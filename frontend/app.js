@@ -687,14 +687,14 @@ function aiTaskPreviewModal(plan){
           </div>
         </div>
       </article>`).join("")}</div>
+      <div id="ai-create-status" class="ai-plan-status hidden" role="status" aria-live="polite"><i></i><span>Creating selected tasks and placing them in Backlog...</span></div>
       <div id="modal-error" class="form-error hidden"></div>
-      <div class="modal-actions"><button type="button" id="back-to-ai-prompt" class="btn">Back</button><button type="button" class="btn" onclick="document.querySelector('#modal-close').click()">Cancel</button><button class="btn primary">Create selected tasks</button></div>
+      <div class="modal-actions"><button type="button" id="back-to-ai-prompt" class="btn">Back</button><button type="button" class="btn" onclick="document.querySelector('#modal-close').click()">Cancel</button><button type="button" id="create-ai-tasks" class="btn primary">Create selected tasks</button></div>
     </form>`,()=>{
       $("#back-to-ai-prompt").onclick=aiTaskPlannerModal;
-      $("#ai-confirm-form").onsubmit=async event=>{
-        event.preventDefault();
-        const button=$('button[type="submit"]',event.currentTarget),error=$("#modal-error");
-        const tasks=$$("[data-ai-task]",event.currentTarget)
+      $("#create-ai-tasks").onclick=async()=>{
+        const form=$("#ai-confirm-form"),button=$("#create-ai-tasks"),error=$("#modal-error"),status=$("#ai-create-status");
+        const tasks=$$("[data-ai-task]",form)
           .filter(row=>$(".ai-task-enabled",row).checked)
           .map(row=>({
             title:$(".ai-task-title",row).value.trim(),
@@ -704,11 +704,13 @@ function aiTaskPreviewModal(plan){
           }));
         if(!tasks.length){error.textContent="Select at least one task.";error.classList.remove("hidden");return}
         if(tasks.some(task=>task.title.length<2)){error.textContent="Every selected task needs a title.";error.classList.remove("hidden");return}
+        error.classList.add("hidden");status.classList.remove("hidden");
         button.disabled=true;button.textContent="Creating tasks...";
         try{
           await api(`/projects/${state.project.id}/ai/task-plan/confirm`,{method:"POST",body:JSON.stringify({tasks})});
-          closeModal();await loadWorkspace();toast(`${tasks.length} AI-planned task${tasks.length===1?"":"s"} created`);
-        }catch(err){error.textContent=err.message;error.classList.remove("hidden");button.disabled=false;button.textContent="Create selected tasks"}
+          status.querySelector("span").textContent=`Created ${tasks.length} task${tasks.length===1?"":"s"}. Refreshing the board...`;
+          await loadWorkspace();closeModal();toast(`${tasks.length} AI-planned task${tasks.length===1?"":"s"} created in Backlog`);
+        }catch(err){error.textContent=err.message;error.classList.remove("hidden");status.classList.add("hidden");button.disabled=false;button.textContent="Create selected tasks"}
       };
     });
 }
