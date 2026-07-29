@@ -210,6 +210,33 @@ class TaskRead(ORMModel):
     updated_at: datetime
 
 
+class AITaskPlanRequest(BaseModel):
+    prompt: str = Field(min_length=10, max_length=4000)
+    maximum_tasks: int = Field(default=10, ge=1, le=50)
+
+
+class AIGeneratedTask(BaseModel):
+    title: str = Field(min_length=2, max_length=220)
+    description: str | None = Field(default=None, max_length=3000)
+    priority: Priority = Priority.medium
+    story_points: int | None = Field(default=None, ge=0, le=100)
+
+
+class AIGeneratedPlan(BaseModel):
+    summary: str = Field(min_length=2, max_length=500)
+    tasks: list[AIGeneratedTask] = Field(min_length=1, max_length=50)
+
+
+class AITaskPlanResponse(AIGeneratedPlan):
+    provider: str
+    model: str
+    fallback_used: bool = False
+
+
+class AITaskPlanConfirm(BaseModel):
+    tasks: list[AIGeneratedTask] = Field(min_length=1, max_length=50)
+
+
 class CommentCreate(BaseModel):
     body: str = Field(min_length=1, max_length=5000)
 

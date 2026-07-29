@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.database import Base, engine
-from app.routers import auth, boards, projects, tasks, workspaces
+from app.routers import ai, auth, boards, projects, tasks, workspaces
 
 
 @asynccontextmanager
@@ -37,6 +37,7 @@ app.include_router(workspaces.router)
 app.include_router(projects.router)
 app.include_router(tasks.router)
 app.include_router(boards.router)
+app.include_router(ai.router)
 
 frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 app.mount("/static", StaticFiles(directory=frontend_dir), name="static")

@@ -14,6 +14,18 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
     cors_origins: list[str] = ["http://localhost:3000"]
+    ai_provider: str = "gemini"
+    ai_provider_order: list[str] = ["gemini", "groq", "openrouter", "huggingface"]
+    ai_max_tasks: int = Field(default=15, ge=1, le=50)
+    ai_request_timeout_seconds: int = Field(default=25, ge=5, le=120)
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-3.6-flash"
+    groq_api_key: str | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
+    openrouter_api_key: str | None = None
+    openrouter_model: str = "openrouter/free"
+    huggingface_api_key: str | None = None
+    huggingface_model: str = "Qwen/Qwen3-8B"
 
     @field_validator("database_url", mode="before")
     @classmethod

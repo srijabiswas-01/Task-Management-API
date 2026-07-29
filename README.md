@@ -49,6 +49,8 @@ The included responsive frontend provides:
 - Trello-style task checklists with automatic completion progress
 - Persistent light and dark themes with responsive, accessible UI styling
 - Task creation, editing, deletion, and comments
+- AI-generated task-plan previews with editable bulk creation
+- Automatic Gemini, Groq, OpenRouter, and Hugging Face fallback
 - Workspace members and teams
 
 After signing in, create a workspace and project. The task board will then let
@@ -90,6 +92,8 @@ Authorization: Bearer <access_token>
 - `GET|PATCH /projects/{id}`
 - `GET|POST /projects/{id}/sprints`
 - `GET|POST /projects/{id}/tasks`
+- `POST /projects/{id}/ai/task-plan`
+- `POST /projects/{id}/ai/task-plan/confirm`
 - `GET|PATCH|DELETE /tasks/{id}`
 - `GET|POST /tasks/{id}/comments`
 - `GET /workspaces/{id}/dashboard`
@@ -104,3 +108,15 @@ alembic upgrade head
 
 For production, generate and commit an Alembic migration before deployment,
 replace the JWT secret, configure PostgreSQL, and restrict CORS origins.
+
+## AI task planning
+
+Copy the provider settings from `.env.example` into `.env` locally and into
+Vercel Environment Variables for deployment. The board's **AI plan** button
+generates a preview without changing project data. After review, confirmed
+tasks are created together and placed in Backlog.
+
+Providers are attempted in `AI_PROVIDER_ORDER`. A timeout, quota response,
+network failure, or invalid generated plan moves to the next configured
+provider. API keys remain server-side and must never be added to frontend code
+or committed to Git.

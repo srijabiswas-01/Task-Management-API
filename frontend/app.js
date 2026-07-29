@@ -259,7 +259,7 @@ function projectSelector() {
 function boardView() {
   if (!state.project) return `${pageHeading("Task board","Visualize work as it moves through your workflow.",`<button id="new-project" class="btn primary">＋ New project</button>`)}${emptyMini("Create a project first","Tasks live inside projects.")}`;
   const columns = state.board?.columns || [];
-  return `${pageHeading("Task board",`Drag tasks and lists to organize ${esc(state.project.name)}.`,`<div class="board-actions"><button id="customize-board" class="btn">⚙ Customize</button><button id="new-task-view" class="btn primary">＋ Add task</button></div>`)}
+  return `${pageHeading("Task board",`Drag tasks and lists to organize ${esc(state.project.name)}.`,`<div class="board-actions"><button id="ai-plan-tasks" class="btn ai-btn">AI plan</button><button id="customize-board" class="btn">⚙ Customize</button><button id="new-task-view" class="btn primary">＋ Add task</button></div>`)}
     <div class="toolbar">${projectSelector()}${state.board?.framework==="scrum"?`<select id="sprint-filter"><option value="">All Scrum work</option><option value="backlog">Product backlog</option>${state.sprints.map(s=>`<option value="${s.id}">${s.is_active?"● ":""}${esc(s.name)}</option>`).join("")}</select>`:""}<span class="framework-pill">${pretty(state.board?.framework||"kanban")} board</span></div>
     <div class="board-wrap"><div class="kanban custom-board" style="grid-template-columns:repeat(${columns.length + 1}, minmax(275px, 1fr))">${columns.map(column=>kanbanColumn(column,tasksForColumn(column.id))).join("")}<button id="add-column" class="add-column">＋ Add another list</button></div></div>`;
 }
@@ -338,6 +338,7 @@ function bindView() {
   $$("[data-column-menu]").forEach(x=>x.onclick=e=>{e.stopPropagation();columnModal(Number(x.dataset.columnMenu))});
   $("#add-column")?.addEventListener("click",()=>columnModal());
   $("#customize-board")?.addEventListener("click",boardSettingsModal);
+  $("#ai-plan-tasks")?.addEventListener("click",aiTaskPlannerModal);
   bindBoardDragDrop();
   $("#project-search")?.addEventListener("input", filterProjects); $("#project-filter")?.addEventListener("change", filterProjects);
 }
@@ -622,6 +623,77 @@ function boardSettingsModal(){
         if(!confirm("Restore the default lists? Custom lists will be removed, but tasks will be preserved."))return;
         const framework=$('[name="framework"]',$("#modal-form")).value;
         try{state.board=await api(`/projects/${state.project.id}/board`,{method:"PUT",body:JSON.stringify({framework,reset:true})});closeModal();state.tasks=await api(`/projects/${state.project.id}/tasks`);render();toast("Default lists restored")}catch(err){$("#modal-error").textContent=err.message;$("#modal-error").classList.remove("hidden")}
+      };
+    });
+}
+function aiTaskPlannerModal(){
+  if(!state.project){toast("Select a project first",true);return}
+  modal(formShell("Plan tasks with AI",`Describe the outcome you want for ${esc(state.project.name)}. You will review every task before it is created.`,`
+    ${field("prompt","What should this project deliver?","textarea","Example: Build a secure mobile application with authentication, payments, testing, and deployment.",true,true)}
+    ${field("maximum_tasks","Maximum tasks","number","10",true,false,10)}
+    <div class="field full ai-note"><strong>Safe preview</strong><span>AI generates a draft only. No board data changes until you confirm the selected tasks.</span></div>`,
+    "Generate task plan"),()=>{
+      const form=$("#modal-form");
+      const maximum=$('[name="maximum_tasks"]',form);
+      maximum.min="1";maximum.max="15";
+      form.onsubmit=async event=>{
+        event.preventDefault();
+        const button=$('button[type="submit"]',form),error=$("#modal-error");
+        button.disabled=true;button.textContent="Generating...";
+        try{
+          const values=formData(form);
+          const plan=await api(`/projects/${state.project.id}/ai/task-plan`,{
+            method:"POST",
+            body:JSON.stringify({prompt:values.prompt,maximum_tasks:Number(values.maximum_tasks)})
+          });
+          aiTaskPreviewModal(plan);
+        }catch(err){
+          error.textContent=err.message;error.classList.remove("hidden");
+          button.disabled=false;button.textContent="Generate task plan";
+        }
+      };
+    });
+}
+function aiTaskPreviewModal(plan){
+  const providerNote=plan.fallback_used
+    ? `Primary provider unavailable; generated with ${pretty(plan.provider)} (${plan.model}).`
+    : `Generated with ${pretty(plan.provider)} (${plan.model}).`;
+  modal(`<h2>Review AI task plan</h2><p class="subtitle">${esc(plan.summary)}</p>
+    <div class="ai-provider ${plan.fallback_used?"fallback":""}">${esc(providerNote)}</div>
+    <form id="ai-confirm-form"><div class="ai-task-list">${plan.tasks.map((task,index)=>`
+      <article class="ai-task-item" data-ai-task="${index}">
+        <input class="ai-task-enabled" type="checkbox" checked aria-label="Include task">
+        <div>
+          <input class="ai-task-title" value="${esc(task.title)}" maxlength="220" required>
+          <textarea class="ai-task-description" maxlength="3000" placeholder="Task details">${esc(task.description||"")}</textarea>
+          <div class="ai-task-meta">
+            <select class="ai-task-priority">${["low","medium","high","critical"].map(value=>`<option value="${value}" ${value===task.priority?"selected":""}>${pretty(value)}</option>`).join("")}</select>
+            <input class="ai-task-points" type="number" min="0" max="100" placeholder="Story points" value="${task.story_points??""}">
+          </div>
+        </div>
+      </article>`).join("")}</div>
+      <div id="modal-error" class="form-error hidden"></div>
+      <div class="modal-actions"><button type="button" id="back-to-ai-prompt" class="btn">Back</button><button type="button" class="btn" onclick="document.querySelector('#modal-close').click()">Cancel</button><button class="btn primary">Create selected tasks</button></div>
+    </form>`,()=>{
+      $("#back-to-ai-prompt").onclick=aiTaskPlannerModal;
+      $("#ai-confirm-form").onsubmit=async event=>{
+        event.preventDefault();
+        const button=$('button[type="submit"]',event.currentTarget),error=$("#modal-error");
+        const tasks=$$("[data-ai-task]",event.currentTarget)
+          .filter(row=>$(".ai-task-enabled",row).checked)
+          .map(row=>({
+            title:$(".ai-task-title",row).value.trim(),
+            description:$(".ai-task-description",row).value.trim()||null,
+            priority:$(".ai-task-priority",row).value,
+            story_points:$(".ai-task-points",row).value===""?null:Number($(".ai-task-points",row).value)
+          }));
+        if(!tasks.length){error.textContent="Select at least one task.";error.classList.remove("hidden");return}
+        if(tasks.some(task=>task.title.length<2)){error.textContent="Every selected task needs a title.";error.classList.remove("hidden");return}
+        button.disabled=true;button.textContent="Creating tasks...";
+        try{
+          await api(`/projects/${state.project.id}/ai/task-plan/confirm`,{method:"POST",body:JSON.stringify({tasks})});
+          closeModal();await loadWorkspace();toast(`${tasks.length} AI-planned task${tasks.length===1?"":"s"} created`);
+        }catch(err){error.textContent=err.message;error.classList.remove("hidden");button.disabled=false;button.textContent="Create selected tasks"}
       };
     });
 }
