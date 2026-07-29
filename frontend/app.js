@@ -43,7 +43,8 @@ function toast(message, error = false) {
 }
 async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
-  const authenticatedRequest = Boolean(state.token) && !path.startsWith("/auth/");
+  const publicAuthRequest = path === "/auth/login" || path === "/auth/register";
+  const authenticatedRequest = Boolean(state.token) && !publicAuthRequest;
   if (authenticatedRequest) headers.Authorization = `Bearer ${state.token}`;
   if (options.body && !(options.body instanceof URLSearchParams)) headers["Content-Type"] = "application/json";
   const response = await fetch(path, {...options, headers});
