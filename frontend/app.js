@@ -555,7 +555,14 @@ function taskModal(task=null,targetColumnId=null){modal(formShell(task?"Edit tas
   <fieldset class="field full assignee-field"><legend>Assignees</legend><div class="assignee-options">${state.members.map(m=>`<label><input type="checkbox" name="assignee_ids" value="${m.user_id}" ${(task?.assignee_ids||[]).includes(m.user_id)?"checked":""}><span class="avatar">${esc(m.user.name.slice(0,2).toUpperCase())}</span>${esc(m.user.name)}</label>`).join("")||"<span class='subtitle'>Add workspace members before assigning this task.</span>"}</div></fieldset>
   ${field("story_points","Story points","number","0–100","",false,task?.story_points)}${field("due_date","Due date","date","","",false,task?.due_date)}
   ${field("start_at","Start date & time","datetime-local","","",false,inputDateTime(task?.start_at))}${field("end_at","End date & time","datetime-local","","",false,inputDateTime(task?.end_at))}
-  ${field("progress","Progress %","number","0–100","",false,task?.progress??0)}`,task?"Save changes":"Create task",task?`<button type="button" id="delete-task" class="btn danger">Delete</button>`:""),()=>{
+  ${progressField(task?.progress??0)}`,task?"Save changes":"Create task",task?`<button type="button" id="delete-task" class="btn danger">Delete</button>`:""),()=>{
+    const progress=$("#task-progress");
+    const updateProgress=()=>{
+      const value=Number(progress.value);
+      $("#task-progress-value").textContent=`${value}%`;
+      progress.style.setProperty("--progress",`${value}%`);
+    };
+    progress.addEventListener("input",updateProgress);updateProgress();
     $("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
       data.assignee_ids=$$('input[name="assignee_ids"]:checked',e.currentTarget).map(input=>Number(input.value));
       ["sprint_id","story_points","progress"].forEach(k=>{if(data[k]!==null)data[k]=Number(data[k])});
@@ -721,6 +728,10 @@ function field(name,label,type="text",placeholder="",required=false,full=false,v
 function selectField(name,label,items,selected="",empty=""){
   const normalized=items.map(x=>Array.isArray(x)?x:[x,pretty(x)]);
   return `<label class="field">${label}<select name="${name}">${empty?`<option value="">${empty}</option>`:""}${normalized.map(([v,l])=>`<option value="${esc(v)}" ${String(v)===String(selected)?"selected":""}>${esc(l)}</option>`).join("")}</select></label>`;
+}
+function progressField(value=0){
+  const progress=Math.max(0,Math.min(100,Number(value)||0));
+  return `<label class="field full progress-field"><span class="progress-label"><span>Progress</span><output id="task-progress-value" for="task-progress">${progress}%</output></span><input id="task-progress" name="progress" type="range" min="0" max="100" step="5" value="${progress}" style="--progress:${progress}%"><span class="progress-scale"><span>0%</span><span>50%</span><span>100%</span></span></label>`;
 }
 function formShell(title,subtitle,fields,submit,extra=""){return `<h2>${title}</h2><p class="subtitle">${subtitle}</p><form id="modal-form"><div class="form-grid">${fields}</div><div id="modal-error" class="form-error hidden"></div><div class="modal-actions">${extra}<button type="button" class="btn" onclick="document.querySelector('#modal-close').click()">Cancel</button><button class="btn primary">${submit}</button></div></form>`}
 async function submitForm(event, action) {
