@@ -120,6 +120,34 @@ class Team(TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text)
 
     workspace: Mapped["Workspace"] = relationship(back_populates="teams")
+    members: Mapped[list["TeamMember"]] = relationship(
+        back_populates="team", cascade="all, delete-orphan"
+    )
+
+
+class TeamMember(TimestampMixin, Base):
+    __tablename__ = "team_members"
+    __table_args__ = (
+        UniqueConstraint(
+            "team_id", "user_id", "project_id", name="uq_team_user_project"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    team_id: Mapped[int] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    designation: Mapped[str] = mapped_column(String(120))
+
+    team: Mapped["Team"] = relationship(back_populates="members")
+    user: Mapped["User"] = relationship()
+    project: Mapped["Project"] = relationship()
 
 
 class Project(TimestampMixin, Base):

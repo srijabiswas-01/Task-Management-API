@@ -3,7 +3,7 @@ from datetime import date
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
-from app.dependencies import CurrentUser, DB
+from app.dependencies import CurrentUser, DB, require_project_admin
 from app.models import (
     BoardColumn,
     ChecklistItem,
@@ -16,7 +16,9 @@ from app.models import (
     TaskBoardPosition,
     TaskSchedule,
     TaskStatus,
+    TeamMember,
     WorkspaceMember,
+    WorkspaceRole,
 )
 from app.routers.projects import accessible_project
 from app.schemas import (
@@ -128,6 +130,7 @@ def create_task(
     db: DB,
     current_user: CurrentUser,
 ) -> Task:
+    require_project_admin(db, project_id, current_user.id)
     project = accessible_project(db, project_id, current_user.id)
     values = payload.model_dump()
     assignee_ids = values.pop("assignee_ids")
@@ -183,6 +186,7 @@ def update_task(
     current_user: CurrentUser,
 ) -> Task:
     task = accessible_task(db, task_id, current_user.id)
+    require_project_admin(db, task.project_id, current_user.id)
     project = accessible_project(db, task.project_id, current_user.id)
     values = payload.model_dump(exclude_unset=True)
     assignee_ids = values.pop("assignee_ids", None)
@@ -210,6 +214,7 @@ def update_task(
 @router.delete("/tasks/{task_id}", status_code=204)
 def delete_task(task_id: int, db: DB, current_user: CurrentUser) -> None:
     task = accessible_task(db, task_id, current_user.id)
+    require_project_admin(db, task.project_id, current_user.id)
     db.delete(task)
     db.commit()
 
@@ -223,7 +228,8 @@ def create_comment(
     db: DB,
     current_user: CurrentUser,
 ) -> Comment:
-    accessible_task(db, task_id, current_user.id)
+    task = accessible_task(db, task_id, current_user.id)
+    require_project_admin(db, task.project_id, current_user.id)
     comment = Comment(
         task_id=task_id, author_id=current_user.id, body=payload.body.strip()
     )
@@ -275,7 +281,8 @@ def create_checklist_item(
     db: DB,
     current_user: CurrentUser,
 ) -> ChecklistItem:
-    accessible_task(db, task_id, current_user.id)
+    task = accessible_task(db, task_id, current_user.id)
+    require_project_admin(db, task.project_id, current_user.id)
     position = len(
         db.scalars(
             select(ChecklistItem).where(ChecklistItem.task_id == task_id)
@@ -318,7 +325,8 @@ def update_checklist_item(
     db: DB,
     current_user: CurrentUser,
 ) -> ChecklistItem:
-    accessible_task(db, task_id, current_user.id)
+    task = accessible_task(db, task_id, current_user.id)
+    require_project_admin(db, task.project_id, current_user.id)
     item = db.scalar(
         select(ChecklistItem).where(
             ChecklistItem.id == item_id,
@@ -345,7 +353,8 @@ def delete_checklist_item(
     db: DB,
     current_user: CurrentUser,
 ) -> None:
-    accessible_task(db, task_id, current_user.id)
+    task = accessible_task(db, task_id, current_user.id)
+    require_project_admin(db, task.project_id, current_user.id)
     item = db.scalar(
         select(ChecklistItem).where(
             ChecklistItem.id == item_id,
@@ -374,24 +383,32 @@ def dashboard(
     )
     if membership is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    project_ids_query = select(Project.id).where(Project.workspace_id == workspace_id)
+    if membership.role != WorkspaceRole.admin:
+        project_ids_query = (
+            project_ids_query.join(TeamMember, TeamMember.project_id == Project.id)
+            .where(TeamMember.user_id == current_user.id)
+            .distinct()
+        )
+    project_ids = list(db.scalars(project_ids_query).all())
     projects = db.scalar(
-        select(func.count(Project.id)).where(Project.workspace_id == workspace_id)
+        select(func.count(Project.id)).where(Project.id.in_(project_ids))
     ) or 0
     active_projects = db.scalar(
         select(func.count(Project.id)).where(
-            Project.workspace_id == workspace_id,
+            Project.id.in_(project_ids),
             Project.status == ProjectStatus.active,
         )
     ) or 0
     task_scope = select(Task.id).join(Project).where(
-        Project.workspace_id == workspace_id
+        Project.id.in_(project_ids)
     )
     tasks = db.scalar(select(func.count()).select_from(task_scope.subquery())) or 0
     completed = db.scalar(
         select(func.count(Task.id))
         .join(Project)
         .where(
-            Project.workspace_id == workspace_id,
+            Project.id.in_(project_ids),
             Task.status == TaskStatus.done,
         )
     ) or 0
@@ -399,7 +416,7 @@ def dashboard(
         select(func.count(Task.id))
         .join(Project)
         .where(
-            Project.workspace_id == workspace_id,
+            Project.id.in_(project_ids),
             Task.due_date < date.today(),
             Task.status != TaskStatus.done,
         )

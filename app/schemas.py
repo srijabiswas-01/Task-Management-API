@@ -72,6 +72,22 @@ class TeamRead(ORMModel):
     created_at: datetime
 
 
+class TeamMemberAdd(BaseModel):
+    user_id: int
+    project_id: int
+    designation: str = Field(min_length=2, max_length=120)
+
+
+class TeamMemberRead(ORMModel):
+    id: int
+    team_id: int
+    user_id: int
+    project_id: int
+    designation: str
+    user: UserRead
+    project: "ProjectRead"
+
+
 class DateRangeModel(BaseModel):
     start_date: date | None = None
     end_date: date | None = None

@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.dependencies import CurrentUser, DB
+from app.dependencies import CurrentUser, DB, require_project_admin
 from app.models import (
     BoardColumn,
     Project,
@@ -153,6 +153,7 @@ def setup_board(
     db: DB,
     current_user: CurrentUser,
 ) -> BoardRead:
+    require_project_admin(db, project_id, current_user.id)
     project = accessible_project(db, project_id, current_user.id)
     board = _board_for_project(db, project.id)
     if board is None:
@@ -234,6 +235,7 @@ def create_column(
     db: DB,
     current_user: CurrentUser,
 ) -> BoardColumn:
+    require_project_admin(db, project_id, current_user.id)
     project = accessible_project(db, project_id, current_user.id)
     board = ensure_board(db, project)
     position = len(
@@ -279,6 +281,7 @@ def update_column(
     db: DB,
     current_user: CurrentUser,
 ) -> BoardColumn:
+    require_project_admin(db, project_id, current_user.id)
     accessible_project(db, project_id, current_user.id)
     column = _accessible_column(db, project_id, column_id)
     for field, value in payload.model_dump(exclude_unset=True).items():
@@ -296,6 +299,7 @@ def delete_column(
     current_user: CurrentUser,
     move_to: int | None = Query(default=None),
 ) -> None:
+    require_project_admin(db, project_id, current_user.id)
     accessible_project(db, project_id, current_user.id)
     column = _accessible_column(db, project_id, column_id)
     columns = list(
@@ -348,6 +352,7 @@ def reorder_columns(
     db: DB,
     current_user: CurrentUser,
 ) -> BoardRead:
+    require_project_admin(db, project_id, current_user.id)
     project = accessible_project(db, project_id, current_user.id)
     board = ensure_board(db, project)
     columns = list(
@@ -375,6 +380,7 @@ def move_task(
     task = db.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
+    require_project_admin(db, task.project_id, current_user.id)
     project = accessible_project(db, task.project_id, current_user.id)
     board = ensure_board(db, project)
     target = _accessible_column(db, project.id, payload.column_id)

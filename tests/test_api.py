@@ -377,3 +377,79 @@ def test_kanban_rejects_sprints_and_scrum_has_one_active_sprint(
     ).json()
     assert second["is_active"] is True
     assert next(s for s in sprints if s["id"] == first["id"])["is_active"] is False
+
+
+def test_team_allocation_limits_member_to_read_only_project_access(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    teammate = client.post(
+        "/auth/register",
+        json={"name": "Mobile Developer", "email": "mobile@example.com", "password": "securepass123"},
+    ).json()
+    login = client.post(
+        "/auth/login",
+        data={"username": "mobile@example.com", "password": "securepass123"},
+    ).json()
+    member_headers = {"Authorization": f"Bearer {login['access_token']}"}
+    workspace_id = client.post(
+        "/workspaces", json={"name": "Product"}, headers=auth_headers
+    ).json()["id"]
+    workspace_member = client.post(
+        f"/workspaces/{workspace_id}/members",
+        json={"email": "mobile@example.com", "role": "member"},
+        headers=auth_headers,
+    ).json()
+    visible_project = client.post(
+        f"/workspaces/{workspace_id}/projects",
+        json={"name": "Mobile application"},
+        headers=auth_headers,
+    ).json()
+    hidden_project = client.post(
+        f"/workspaces/{workspace_id}/projects",
+        json={"name": "Internal admin"},
+        headers=auth_headers,
+    ).json()
+    team = client.post(
+        f"/workspaces/{workspace_id}/teams",
+        json={"name": "Mobile team"},
+        headers=auth_headers,
+    ).json()
+    allocation = client.post(
+        f"/workspaces/{workspace_id}/teams/{team['id']}/members",
+        json={
+            "user_id": teammate["id"],
+            "project_id": visible_project["id"],
+            "designation": "Android Developer",
+        },
+        headers=auth_headers,
+    )
+    assert allocation.status_code == 201
+    assert allocation.json()["designation"] == "Android Developer"
+
+    projects = client.get(
+        f"/workspaces/{workspace_id}/projects", headers=member_headers
+    ).json()
+    assert [project["id"] for project in projects] == [visible_project["id"]]
+    assert client.get(
+        f"/projects/{visible_project['id']}/board", headers=member_headers
+    ).status_code == 200
+    assert client.get(
+        f"/projects/{hidden_project['id']}", headers=member_headers
+    ).status_code == 404
+    assert client.post(
+        f"/projects/{visible_project['id']}/tasks",
+        json={"title": "Member cannot create this"},
+        headers=member_headers,
+    ).status_code == 403
+
+    assert client.delete(
+        f"/workspaces/{workspace_id}/teams/{team['id']}/members/{allocation.json()['id']}",
+        headers=auth_headers,
+    ).status_code == 204
+    assert client.get(
+        f"/workspaces/{workspace_id}/projects", headers=member_headers
+    ).json() == []
+    assert client.delete(
+        f"/workspaces/{workspace_id}/members/{workspace_member['id']}",
+        headers=auth_headers,
+    ).status_code == 204

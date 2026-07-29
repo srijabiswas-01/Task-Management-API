@@ -3,7 +3,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = {
   token: localStorage.getItem("orbit_token"),
   user: null, workspaces: [], workspace: null, projects: [], project: null,
-  tasks: [], sprints: [], members: [], teams: [], dashboard: null, board: null, view: "dashboard"
+  tasks: [], sprints: [], members: [], teams: [], teamMembers: [], dashboard: null, board: null, view: "dashboard"
 };
 const VIEW_PATHS = {
   dashboard: "/app/overview",
@@ -29,6 +29,7 @@ function esc(value = "") {
   const div = document.createElement("div"); div.textContent = value ?? ""; return div.innerHTML;
 }
 function pretty(value = "") { return value.replaceAll("_", " ").replace(/\b\w/g, c => c.toUpperCase()); }
+function isAdmin() { return state.members.find(m => m.user_id === state.user?.id)?.role === "admin"; }
 function date(value) { return value ? new Date(value).toLocaleDateString(undefined, {month:"short", day:"numeric", year:"numeric"}) : "Not set"; }
 function dateTime(value) { return value ? new Date(value).toLocaleString(undefined, {month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"}) : "Not set"; }
 function inputDateTime(value) {
@@ -173,9 +174,10 @@ async function loadWorkspace() {
   try {
     const workspace = activeWorkspace();
     if (!workspace) { renderNoWorkspace(); return; }
-    [state.projects, state.dashboard, state.members, state.teams] = await Promise.all([
+    [state.projects, state.dashboard, state.members, state.teams, state.teamMembers] = await Promise.all([
       api(`/workspaces/${workspace.id}/projects`), api(`/workspaces/${workspace.id}/dashboard`),
-      api(`/workspaces/${workspace.id}/members`), api(`/workspaces/${workspace.id}/teams`)
+      api(`/workspaces/${workspace.id}/members`), api(`/workspaces/${workspace.id}/teams`),
+      api(`/workspaces/${workspace.id}/team-members`)
     ]);
     if (state.project && !state.projects.some(p => p.id === state.project.id)) state.project = null;
     const savedProjectId=Number(localStorage.getItem(`orbit_project_${workspace.id}`));
@@ -223,10 +225,12 @@ function render() {
   $("#page-title").textContent = names[state.view];
   $('[data-view="sprints"]').classList.toggle("hidden", Boolean(state.project) && state.board?.framework !== "scrum");
   $("#sprint-project-label").textContent = state.board?.framework==="scrum"&&state.project?state.project.name:"";
-  $("#quick-task").classList.toggle("hidden", state.view !== "board" || !state.project);
+  $("#quick-task").classList.toggle("hidden", state.view !== "board" || !state.project || !isAdmin());
   $("#content").innerHTML = ({dashboard:dashboardView,projects:projectsView,board:boardView,gantt:ganttView,sprints:sprintsView,people:peopleView}[state.view])();
   $$("#main-nav button").forEach(button => button.classList.toggle("active", button.dataset.view === state.view));
   bindView();
+  document.body.classList.toggle("read-only", !isAdmin());
+  bindAccessControls();
 }
 function pageHeading(title, text, action = "") {
   return `<div class="page-heading"><div><h1>${title}</h1><p>${text}</p></div>${action}</div>`;
@@ -263,7 +267,7 @@ function projectsView() {
     <div class="toolbar"><input id="project-search" placeholder="⌕  Search projects"><select id="project-filter"><option value="">All statuses</option><option>planned</option><option>active</option><option>on_hold</option><option>completed</option></select></div>
     <div id="project-grid" class="project-grid">${projectCards(state.projects)}</div>`;
 }
-function projectCards(items){return items.length?items.map(p=>`<article class="project-card" data-project="${p.id}"><div class="project-head"><span class="project-icon">${esc(p.name[0].toUpperCase())}</span><div class="project-card-actions"><span class="badge ${p.status}">${pretty(p.status)}</span><button data-edit-project="${p.id}" title="Edit project">•••</button></div></div><h3>${esc(p.name)}</h3><p>${esc(p.description||"No description yet.")}</p><div class="project-meta"><span>${pretty(p.priority)} priority</span><span>${p.deadline?`Due ${date(p.deadline)}`:"No deadline"}</span></div></article>`).join(""):emptyMini("No projects yet","Create your first project to begin.") }
+function projectCards(items){return items.length?items.map(p=>`<article class="project-card" data-project="${p.id}"><div class="project-head"><span class="project-icon">${esc(p.name[0].toUpperCase())}</span><div class="project-card-actions"><span class="badge ${p.status}">${pretty(p.status)}</span>${isAdmin()?`<button data-edit-project="${p.id}" title="Edit project">•••</button>`:""}</div></div><h3>${esc(p.name)}</h3><p>${esc(p.description||"No description yet.")}</p><div class="project-meta"><span>${pretty(p.priority)} priority</span><span>${p.deadline?`Due ${date(p.deadline)}`:"No deadline"}</span></div></article>`).join(""):emptyMini("No projects available","Ask an admin to allocate you to a project team.") }
 function projectSelector() {
   return `<select id="project-select">${state.projects.map(p=>`<option value="${p.id}" ${p.id===state.project?.id?"selected":""}>${esc(p.name)}</option>`).join("")}</select>`;
 }
@@ -279,11 +283,11 @@ function tasksForColumn(columnId) {
     .filter(task => Number(state.board?.task_positions?.[task.id]?.column_id) === columnId)
     .sort((a,b) => (state.board.task_positions[a.id]?.position ?? 0) - (state.board.task_positions[b.id]?.position ?? 0));
 }
-function kanbanColumn(column,tasks){return `<section class="kanban-col" draggable="true" data-column="${column.id}"><div class="kanban-head"><i style="background:${column.color}"></i><strong>${esc(column.name)}</strong><span>${tasks.length}</span><button class="column-menu" data-column-menu="${column.id}" title="List options">•••</button></div><div class="task-dropzone" data-drop-column="${column.id}">${tasks.map(taskCard).join("")}</div><button class="column-add" data-add-to="${column.id}">＋ Add a card</button></section>`}
+function kanbanColumn(column,tasks){return `<section class="kanban-col" draggable="${isAdmin()}" data-column="${column.id}"><div class="kanban-head"><i style="background:${column.color}"></i><strong>${esc(column.name)}</strong><span class="column-count" title="${tasks.length} tasks">${tasks.length}</span>${isAdmin()?`<button class="column-menu" data-column-menu="${column.id}" title="List options">•••</button>`:""}</div><div class="task-dropzone" data-drop-column="${column.id}">${tasks.map(taskCard).join("")}</div>${isAdmin()?`<button class="column-add" data-add-to="${column.id}">＋ Add a card</button>`:""}</section>`}
 function taskCard(t){
   const assignees=(t.assignee_ids||[]).map(id=>state.members.find(m=>m.user_id===id)?.user).filter(Boolean);
   const checklist=t.checklist_total?`<span class="check-count ${t.checklist_done===t.checklist_total?"complete":""}">☑ ${t.checklist_done}/${t.checklist_total}</span>`:"";
-  return `<article class="task-card" draggable="true" data-task="${t.id}"><span class="priority-dot ${t.priority}">${t.priority}</span><h4>${esc(t.title)}</h4><p>${esc(t.description||"No description")}</p>
+  return `<article class="task-card" draggable="${isAdmin()}" data-task="${t.id}"><span class="priority-dot ${t.priority}">${t.priority}</span><h4>${esc(t.title)}</h4><p>${esc(t.description||"No description")}</p>
     ${t.progress?`<div class="card-progress"><i style="width:${t.progress}%"></i></div>`:""}
     <div class="task-foot"><span>${t.end_at?`◷ ${dateTime(t.end_at)}`:t.due_date?`◷ ${date(t.due_date)}`:`#${t.id}`}</span>${checklist}<div class="avatar-stack">${assignees.slice(0,3).map(u=>`<b class="avatar" title="${esc(u.name)}">${esc(u.name.slice(0,2).toUpperCase())}</b>`).join("")}${assignees.length>3?`<b class="avatar">+${assignees.length-3}</b>`:!assignees.length?'<b class="avatar">—</b>':""}</div></div></article>`;
 }
@@ -359,6 +363,7 @@ let draggedTaskId = null;
 let draggedColumnId = null;
 let ignoreTaskClick = false;
 function bindBoardDragDrop() {
+  if (!isAdmin()) return;
   $$(".task-card[draggable]").forEach(card => {
     card.addEventListener("dragstart", event => {
       draggedTaskId = Number(card.dataset.task);
@@ -734,6 +739,34 @@ function progressField(value=0){
   return `<label class="field full progress-field"><span class="progress-label"><span>Progress</span><output id="task-progress-value" for="task-progress">${progress}%</output></span><input id="task-progress" name="progress" type="range" min="0" max="100" step="5" value="${progress}" style="--progress:${progress}%"><span class="progress-scale"><span>0%</span><span>50%</span><span>100%</span></span></label>`;
 }
 function formShell(title,subtitle,fields,submit,extra=""){return `<h2>${title}</h2><p class="subtitle">${subtitle}</p><form id="modal-form"><div class="form-grid">${fields}</div><div id="modal-error" class="form-error hidden"></div><div class="modal-actions">${extra}<button type="button" class="btn" onclick="document.querySelector('#modal-close').click()">Cancel</button><button class="btn primary">${submit}</button></div></form>`}
+
+function peopleView() {
+  const admin=isAdmin();
+  const action=admin?`<button id="add-member" class="btn primary">＋ Add member</button>`:`<span class="readonly-pill">View only</span>`;
+  return `${pageHeading("People & teams","Allocate members to a team and a specific project.",action)}
+  <div class="people-grid"><section class="panel"><div class="panel-header"><h3>Workspace members</h3><span class="member-count">${state.members.length}</span></div>
+    ${state.members.map(m=>`<div class="member-row"><b class="avatar">${esc(m.user.name.slice(0,2).toUpperCase())}</b><div><strong>${esc(m.user.name)}</strong><small>${esc(m.user.email)}</small></div><span class="badge ${m.role}">${m.role}</span>${admin&&m.user_id!==state.user.id?`<button class="remove-action" data-remove-member="${m.id}">Remove</button>`:""}</div>`).join("")}
+  </section><section class="panel"><div class="panel-header"><h3>Teams</h3>${admin?'<button id="new-team">＋ New team</button>':`<span class="member-count">${state.teams.length}</span>`}</div>
+    ${state.teams.length?state.teams.map(t=>{const allocations=state.teamMembers.filter(item=>item.team_id===t.id);return `<article class="team-card"><div class="team-card-head"><div><h4>${esc(t.name)}</h4><p>${esc(t.description||"No description")}</p></div>${admin?`<div class="team-actions"><button data-allocate-team="${t.id}">＋ Allocate</button><button class="remove-action" data-delete-team="${t.id}">Delete</button></div>`:""}</div><div class="team-member-list">${allocations.length?allocations.map(a=>`<div class="team-member-row"><b class="avatar">${esc(a.user.name.slice(0,2).toUpperCase())}</b><div><strong>${esc(a.user.name)}</strong><small>${esc(a.designation)} · ${esc(a.project.name)}</small></div>${admin?`<button class="remove-action" data-remove-allocation="${a.id}" data-team-id="${t.id}">Remove</button>`:""}</div>`).join(""):'<p class="team-empty">No allocated members yet.</p>'}</div></article>`}).join(""):emptyMini("No teams yet","Create a team for a focused group.")}
+  </section></div>`;
+}
+
+function teamAllocationModal(teamId){
+  const eligible=state.members.filter(m=>m.role!=="admin");
+  if(!eligible.length||!state.projects.length){toast("Add a member and create a project first",true);return}
+  modal(formShell("Allocate team member","Choose their project and designation.",`${selectField("user_id","Member",eligible.map(m=>[m.user_id,m.user.name]))}${selectField("project_id","Project",state.projects.map(p=>[p.id,p.name]))}${field("designation","Designation","text","e.g. Mobile Developer",true,true)}`,"Allocate member"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
+    data.user_id=Number(data.user_id);data.project_id=Number(data.project_id);
+    await api(`/workspaces/${state.workspace.id}/teams/${teamId}/members`,{method:"POST",body:JSON.stringify(data)});await loadWorkspace();toast("Member allocated to project");
+  }));
+}
+
+function bindAccessControls(){
+  if(!isAdmin())return;
+  $$("[data-allocate-team]").forEach(button=>button.onclick=()=>teamAllocationModal(Number(button.dataset.allocateTeam)));
+  $$("[data-delete-team]").forEach(button=>button.onclick=async()=>{if(!confirm("Delete this team and its allocations?"))return;try{await api(`/workspaces/${state.workspace.id}/teams/${button.dataset.deleteTeam}`,{method:"DELETE"});await loadWorkspace();toast("Team deleted")}catch(err){toast(err.message,true)}});
+  $$("[data-remove-allocation]").forEach(button=>button.onclick=async()=>{if(!confirm("Remove this member from the project team?"))return;try{await api(`/workspaces/${state.workspace.id}/teams/${button.dataset.teamId}/members/${button.dataset.removeAllocation}`,{method:"DELETE"});await loadWorkspace();toast("Team member removed")}catch(err){toast(err.message,true)}});
+  $$("[data-remove-member]").forEach(button=>button.onclick=async()=>{if(!confirm("Remove this member from the workspace and all teams?"))return;try{await api(`/workspaces/${state.workspace.id}/members/${button.dataset.removeMember}`,{method:"DELETE"});await loadWorkspace();toast("Workspace member removed")}catch(err){toast(err.message,true)}});
+}
 async function submitForm(event, action) {
   event.preventDefault(); const button=$('button[type="submit"],button.primary',event.target), error=$("#modal-error"); button.disabled=true;
   try { await action(formData(event.target)); closeModal(); render(); } catch(err) { error.textContent=err.message;error.classList.remove("hidden");button.disabled=false; }

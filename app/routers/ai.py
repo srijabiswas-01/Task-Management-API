@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from app.core.config import settings
-from app.dependencies import CurrentUser, DB
+from app.dependencies import CurrentUser, DB, require_project_admin
 from app.models import Task, TaskStatus
 from app.routers.projects import accessible_project
 from app.routers.tasks import set_task_schedule, sync_board_column_to_status
@@ -60,6 +60,7 @@ def confirm_task_plan(
     db: DB,
     current_user: CurrentUser,
 ) -> list[Task]:
+    require_project_admin(db, project_id, current_user.id)
     project = accessible_project(db, project_id, current_user.id)
     if len(payload.tasks) > settings.ai_max_tasks:
         raise HTTPException(

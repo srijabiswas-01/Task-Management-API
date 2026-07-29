@@ -7,12 +7,15 @@ from app.dependencies import (
     DB,
     require_workspace_admin,
     require_workspace_member,
+    require_team_admin,
 )
-from app.models import Team, User, Workspace, WorkspaceMember, WorkspaceRole
+from app.models import Project, Team, TeamMember, User, Workspace, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     MemberAdd,
     MemberRead,
     TeamCreate,
+    TeamMemberAdd,
+    TeamMemberRead,
     TeamRead,
     WorkspaceCreate,
     WorkspaceRead,
@@ -180,3 +183,149 @@ def list_teams(
             .order_by(Team.created_at.desc())
         ).all()
     )
+
+
+@router.delete("/{workspace_id}/members/{member_id}", status_code=204)
+def remove_member(
+    workspace_id: int, member_id: int, db: DB, current_user: CurrentUser
+) -> None:
+    require_workspace_admin(db, workspace_id, current_user.id)
+    member = db.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.id == member_id,
+            WorkspaceMember.workspace_id == workspace_id,
+        )
+    )
+    if member is None:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if member.user_id == current_user.id:
+        raise HTTPException(status_code=409, detail="You cannot remove yourself")
+    allocations = list(
+        db.scalars(
+            select(TeamMember)
+            .join(Team)
+            .where(
+                Team.workspace_id == workspace_id,
+                TeamMember.user_id == member.user_id,
+            )
+        ).all()
+    )
+    for allocation in allocations:
+        db.delete(allocation)
+    db.delete(member)
+    db.commit()
+
+
+@router.delete("/{workspace_id}/teams/{team_id}", status_code=204)
+def delete_team(
+    workspace_id: int, team_id: int, db: DB, current_user: CurrentUser
+) -> None:
+    require_workspace_admin(db, workspace_id, current_user.id)
+    team = db.scalar(
+        select(Team).where(Team.id == team_id, Team.workspace_id == workspace_id)
+    )
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+    db.delete(team)
+    db.commit()
+
+
+@router.get(
+    "/{workspace_id}/team-members", response_model=list[TeamMemberRead]
+)
+def list_team_members(
+    workspace_id: int, db: DB, current_user: CurrentUser
+) -> list[TeamMember]:
+    require_workspace_member(db, workspace_id, current_user.id)
+    return list(
+        db.scalars(
+            select(TeamMember)
+            .join(Team)
+            .options(
+                selectinload(TeamMember.user),
+                selectinload(TeamMember.project),
+            )
+            .where(Team.workspace_id == workspace_id)
+            .order_by(TeamMember.created_at)
+        ).all()
+    )
+
+
+@router.post(
+    "/{workspace_id}/teams/{team_id}/members",
+    response_model=TeamMemberRead,
+    status_code=201,
+)
+def allocate_team_member(
+    workspace_id: int,
+    team_id: int,
+    payload: TeamMemberAdd,
+    db: DB,
+    current_user: CurrentUser,
+) -> TeamMember:
+    team = require_team_admin(db, team_id, current_user.id)
+    if team.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="Team not found")
+    member = db.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == payload.user_id,
+        )
+    )
+    project = db.scalar(
+        select(Project).where(
+            Project.id == payload.project_id,
+            Project.workspace_id == workspace_id,
+        )
+    )
+    if member is None or project is None:
+        raise HTTPException(status_code=400, detail="Invalid member or project")
+    existing = db.scalar(
+        select(TeamMember).where(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == payload.user_id,
+            TeamMember.project_id == payload.project_id,
+        )
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="Member is already allocated")
+    allocation = TeamMember(
+        team_id=team_id,
+        user_id=payload.user_id,
+        project_id=payload.project_id,
+        designation=payload.designation.strip(),
+    )
+    db.add(allocation)
+    db.commit()
+    return db.scalar(
+        select(TeamMember)
+        .options(
+            selectinload(TeamMember.user),
+            selectinload(TeamMember.project),
+        )
+        .where(TeamMember.id == allocation.id)
+    )
+
+
+@router.delete(
+    "/{workspace_id}/teams/{team_id}/members/{allocation_id}", status_code=204
+)
+def remove_team_member(
+    workspace_id: int,
+    team_id: int,
+    allocation_id: int,
+    db: DB,
+    current_user: CurrentUser,
+) -> None:
+    team = require_team_admin(db, team_id, current_user.id)
+    if team.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="Team not found")
+    allocation = db.scalar(
+        select(TeamMember).where(
+            TeamMember.id == allocation_id, TeamMember.team_id == team_id
+        )
+    )
+    if allocation is None:
+        raise HTTPException(status_code=404, detail="Team member not found")
+    db.delete(allocation)
+    db.commit()

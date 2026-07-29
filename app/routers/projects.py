@@ -7,7 +7,7 @@ from app.dependencies import (
     require_workspace_admin,
     require_workspace_member,
 )
-from app.models import Project, ProjectBoard, Sprint, WorkspaceMember
+from app.models import Project, ProjectBoard, Sprint, TeamMember, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     ProjectCreate,
     ProjectRead,
@@ -21,11 +21,18 @@ router = APIRouter(tags=["Projects"])
 
 
 def accessible_project(db: DB, project_id: int, user_id: int) -> Project:
-    project = db.scalar(
-        select(Project)
-        .join(WorkspaceMember, WorkspaceMember.workspace_id == Project.workspace_id)
-        .where(Project.id == project_id, WorkspaceMember.user_id == user_id)
-    )
+    project = db.get(Project, project_id)
+    if project is not None:
+        membership = require_workspace_member(db, project.workspace_id, user_id)
+        if membership.role != WorkspaceRole.admin:
+            allocated = db.scalar(
+                select(TeamMember.id).where(
+                    TeamMember.project_id == project_id,
+                    TeamMember.user_id == user_id,
+                )
+            )
+            if allocated is None:
+                project = None
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
@@ -54,7 +61,7 @@ def create_project(
     db: DB,
     current_user: CurrentUser,
 ) -> Project:
-    require_workspace_member(db, workspace_id, current_user.id)
+    require_workspace_admin(db, workspace_id, current_user.id)
     project = Project(workspace_id=workspace_id, **payload.model_dump())
     db.add(project)
     db.commit()
@@ -68,14 +75,13 @@ def create_project(
 def list_projects(
     workspace_id: int, db: DB, current_user: CurrentUser
 ) -> list[Project]:
-    require_workspace_member(db, workspace_id, current_user.id)
-    return list(
-        db.scalars(
-            select(Project)
-            .where(Project.workspace_id == workspace_id)
-            .order_by(Project.created_at.desc())
-        ).all()
-    )
+    membership = require_workspace_member(db, workspace_id, current_user.id)
+    query = select(Project).where(Project.workspace_id == workspace_id)
+    if membership.role != WorkspaceRole.admin:
+        query = query.join(
+            TeamMember, TeamMember.project_id == Project.id
+        ).where(TeamMember.user_id == current_user.id).distinct()
+    return list(db.scalars(query.order_by(Project.created_at.desc())).all())
 
 
 @router.get("/projects/{project_id}", response_model=ProjectRead)
@@ -91,6 +97,7 @@ def update_project(
     current_user: CurrentUser,
 ) -> Project:
     project = accessible_project(db, project_id, current_user.id)
+    require_workspace_admin(db, project.workspace_id, current_user.id)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(project, field, value)
     db.commit()
@@ -122,6 +129,7 @@ def create_sprint(
     current_user: CurrentUser,
 ) -> Sprint:
     project = accessible_project(db, project_id, current_user.id)
+    require_workspace_admin(db, project.workspace_id, current_user.id)
     require_scrum_board(db, project)
     if payload.is_active:
         for current in db.scalars(
@@ -164,6 +172,7 @@ def update_sprint(
     if sprint is None:
         raise HTTPException(status_code=404, detail="Sprint not found")
     project = accessible_project(db, sprint.project_id, current_user.id)
+    require_workspace_admin(db, project.workspace_id, current_user.id)
     require_scrum_board(db, project)
     values = payload.model_dump(exclude_unset=True)
     if values.get("is_active"):
