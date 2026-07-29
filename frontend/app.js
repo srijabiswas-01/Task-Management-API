@@ -642,14 +642,18 @@ function aiTaskPlannerModal(){
   modal(formShell("Plan tasks with AI",`Describe the outcome you want for ${esc(state.project.name)}. You will review every task before it is created.`,`
     ${field("prompt","What should this project deliver?","textarea","Example: Build a secure mobile application with authentication, payments, testing, and deployment.",true,true)}
     ${field("maximum_tasks","Maximum tasks","number","10",true,false,10)}
-    <div class="field full ai-note"><strong>Safe preview</strong><span>AI generates a draft only. No board data changes until you confirm the selected tasks.</span></div>`,
+    <div class="field full ai-note"><strong>Safe preview</strong><span>AI generates a draft only. No board data changes until you confirm the selected tasks.</span></div>
+    <div id="ai-plan-status" class="ai-plan-status hidden" role="status" aria-live="polite"><i></i><span>Contacting AI providers and building your task plan...</span></div>`,
     "Generate task plan"),()=>{
       const form=$("#modal-form");
       const maximum=$('[name="maximum_tasks"]',form);
+      const button=$("button.primary",form);
       maximum.min="1";maximum.max="15";
-      form.onsubmit=async event=>{
-        event.preventDefault();
-        const button=$('button[type="submit"]',form),error=$("#modal-error");
+      button.type="button";
+      button.onclick=async()=>{
+        if(!form.reportValidity())return;
+        const error=$("#modal-error"),status=$("#ai-plan-status");
+        error.classList.add("hidden");status.classList.remove("hidden");
         button.disabled=true;button.textContent="Generating...";
         try{
           const values=formData(form);
@@ -660,7 +664,7 @@ function aiTaskPlannerModal(){
           aiTaskPreviewModal(plan);
         }catch(err){
           error.textContent=err.message;error.classList.remove("hidden");
-          button.disabled=false;button.textContent="Generate task plan";
+          status.classList.add("hidden");button.disabled=false;button.textContent="Generate task plan";
         }
       };
     });
