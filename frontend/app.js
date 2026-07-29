@@ -43,10 +43,11 @@ function toast(message, error = false) {
 }
 async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
-  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  const authenticatedRequest = Boolean(state.token) && !path.startsWith("/auth/");
+  if (authenticatedRequest) headers.Authorization = `Bearer ${state.token}`;
   if (options.body && !(options.body instanceof URLSearchParams)) headers["Content-Type"] = "application/json";
   const response = await fetch(path, {...options, headers});
-  if (response.status === 401) { logout(false); throw new Error("Your session expired. Please sign in again."); }
+  if (response.status === 401 && authenticatedRequest) { logout(false); throw new Error("Your session expired. Please sign in again."); }
   if (!response.ok) {
     let detail = "Something went wrong";
     try { const data = await response.json(); detail = Array.isArray(data.detail) ? data.detail.map(x => x.msg).join(", ") : data.detail; } catch {}
