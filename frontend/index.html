@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css?v=20260728-10">
+  <link rel="stylesheet" href="/static/styles.css?v=20260729-11">
 </head>
 <body>
   <div id="toast" class="toast" aria-live="polite"></div>
@@ -36,13 +36,13 @@
         <p id="auth-subtitle">Sign in to continue to your workspace.</p>
         <form id="login-form" class="form-stack">
           <label>Email address<input id="login-email" type="email" placeholder="you@company.com" required></label>
-          <label>Password<input id="login-password" type="password" placeholder="At least 8 characters" minlength="8" required></label>
+          <label>Password<span class="password-field"><input id="login-password" type="password" placeholder="At least 8 characters" minlength="8" required><button class="password-toggle" type="button" data-password-target="login-password" aria-label="Show password" aria-pressed="false" title="Show password"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.7"/></svg></button></span></label>
           <button class="btn primary wide" type="submit">Sign in <span>→</span></button>
         </form>
         <form id="register-form" class="form-stack hidden">
           <label>Full name<input id="register-name" placeholder="Your name" minlength="2" required></label>
           <label>Email address<input id="register-email" type="email" placeholder="you@company.com" required></label>
-          <label>Password<input id="register-password" type="password" placeholder="At least 8 characters" minlength="8" required></label>
+          <label>Password<span class="password-field"><input id="register-password" type="password" placeholder="At least 8 characters" minlength="8" required><button class="password-toggle" type="button" data-password-target="register-password" aria-label="Show password" aria-pressed="false" title="Show password"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.7"/></svg></button></span></label>
           <button class="btn primary wide" type="submit">Create account <span>→</span></button>
         </form>
         <p class="auth-switch"><span id="switch-copy">New to Orbit?</span> <button id="auth-switch" class="link-btn">Create an account</button></p>
@@ -101,6 +101,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=20260728-10"></script>
+  <script src="/static/app.js?v=20260729-11"></script>
 </body>
 </html>

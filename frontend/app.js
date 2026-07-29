@@ -84,6 +84,15 @@ $("#auth-switch").onclick = () => {
   $("#auth-switch").textContent = registerMode ? "Sign in" : "Create an account";
   $("#auth-error").classList.add("hidden");
 };
+$$("[data-password-target]").forEach(button=>button.onclick=()=>{
+  const input=document.getElementById(button.dataset.passwordTarget);
+  const showing=input.type==="text";
+  input.type=showing?"password":"text";
+  button.setAttribute("aria-pressed",String(!showing));
+  button.setAttribute("aria-label",showing?"Show password":"Hide password");
+  button.title=showing?"Show password":"Hide password";
+  button.classList.toggle("showing",!showing);
+});
 $("#login-form").onsubmit = async e => {
   e.preventDefault();
   $("#auth-error").classList.add("hidden");
