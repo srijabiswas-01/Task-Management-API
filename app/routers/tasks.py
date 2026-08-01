@@ -54,9 +54,17 @@ def set_task_assignees(
                 status_code=400,
                 detail="Every assignee must be a workspace member",
             )
-    task.task_assignees.clear()
+    selected_ids = set(unique_ids)
+    existing_ids = {item.user_id for item in task.task_assignees}
+    task.task_assignees[:] = [
+        item
+        for item in task.task_assignees
+        if item.user_id in selected_ids
+    ]
     task.task_assignees.extend(
-        TaskAssignee(user_id=user_id) for user_id in unique_ids
+        TaskAssignee(user_id=user_id)
+        for user_id in unique_ids
+        if user_id not in existing_ids
     )
     task.assignee_id = unique_ids[0] if unique_ids else None
 
@@ -85,6 +93,8 @@ def sync_board_column_to_status(db: DB, task: Task) -> None:
     item = db.scalar(
         select(TaskBoardPosition).where(TaskBoardPosition.task_id == task.id)
     )
+    if item is not None and item.column_id == column.id:
+        return
     next_position = len(
         db.scalars(
             select(TaskBoardPosition).where(

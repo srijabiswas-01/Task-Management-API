@@ -32,6 +32,34 @@ function pretty(value = "") { return value.replaceAll("_", " ").replace(/\b\w/g,
 function isAdmin() { return state.members.find(m => m.user_id === state.user?.id)?.role === "admin"; }
 function date(value) { return value ? new Date(value).toLocaleDateString(undefined, {month:"short", day:"numeric", year:"numeric"}) : "Not set"; }
 function dateTime(value) { return value ? new Date(value).toLocaleString(undefined, {month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"}) : "Not set"; }
+function pdfText(value="") { return String(value).normalize("NFKD").replace(/[^\x20-\x7E]/g," ").replace(/\\/g,"\\\\").replace(/\(/g,"\\(").replace(/\)/g,"\\)"); }
+function downloadPdf(title,lines,fileName){
+  const pages=[];
+  for(let index=0;index<Math.max(1,lines.length);index+=44)pages.push(lines.slice(index,index+44));
+  const objects=[null,null,null,"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"],pageIds=[];
+  pages.forEach(linesForPage=>{
+    const pageId=objects.length,contentId=pageId+1;pageIds.push(pageId);
+    const commands=["BT","/F1 16 Tf",`50 800 Td (${pdfText(title)}) Tj`,"/F1 9 Tf"];
+    linesForPage.forEach((line,index)=>commands.push(`0 -${index===0?28:16} Td (${pdfText(line)}) Tj`));commands.push("ET");
+    const stream=commands.join("\n");
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Rotate 90 /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`);
+    objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+  });
+  objects[1]="<< /Type /Catalog /Pages 2 0 R >>";objects[2]=`<< /Type /Pages /Kids [${pageIds.map(id=>`${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`;
+  let pdf="%PDF-1.4\n",offsets=[0];
+  for(let id=1;id<objects.length;id++){offsets[id]=pdf.length;pdf+=`${id} 0 obj\n${objects[id]}\nendobj\n`}
+  const xref=pdf.length;pdf+=`xref\n0 ${objects.length}\n0000000000 65535 f \n${offsets.slice(1).map(offset=>String(offset).padStart(10,"0")+" 00000 n ").join("\n")}\ntrailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  const link=document.createElement("a");link.href=URL.createObjectURL(new Blob([pdf],{type:"application/pdf"}));link.download=`${fileName}.pdf`;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);
+}
+function safeFileName(value){return String(value||"export").trim().replace(/[^a-z0-9_-]+/gi,"-").replace(/^-+|-+$/g,"").toLowerCase()||"export"}
+function exportBoardPdf(){
+  const lines=[];(state.board?.columns||[]).forEach(column=>{const tasks=tasksForColumn(column.id);lines.push(`${column.name} (${tasks.length})`);tasks.forEach((task,index)=>lines.push(`  ${index+1}. ${task.title} | ${pretty(task.priority)} | ${task.progress}% | Due: ${date(task.end_at||task.due_date)}`));lines.push("")});
+  downloadPdf(`${state.project.name} - Task Board`,lines,`${safeFileName(state.project.name)}-board`);toast("Board PDF downloaded");
+}
+function exportGanttPdf(){
+  const lines=state.tasks.filter(task=>(task.start_at||task.start_date)&&(task.end_at||task.due_date)).map((task,index)=>`${index+1}. ${task.title} | ${dateTime(task.start_at||task.start_date)} - ${dateTime(task.end_at||task.due_date)} | ${pretty(task.status)} | ${task.progress}%`);if(!lines.length)lines.push("No scheduled tasks.");
+  downloadPdf(`${state.project.name} - Gantt Chart`,lines,`${safeFileName(state.project.name)}-gantt-chart`);toast("Gantt chart PDF downloaded");
+}
 function inputDateTime(value) {
   if (!value) return "";
   const parsed = new Date(value);
@@ -274,7 +302,7 @@ function projectSelector() {
 function boardView() {
   if (!state.project) return `${pageHeading("Task board","Visualize work as it moves through your workflow.",`<button id="new-project" class="btn primary">＋ New project</button>`)}${emptyMini("Create a project first","Tasks live inside projects.")}`;
   const columns = state.board?.columns || [];
-  return `${pageHeading("Task board",`Drag tasks and lists to organize ${esc(state.project.name)}.`,`<div class="board-actions"><button id="ai-plan-tasks" class="btn ai-btn">AI plan</button><button id="customize-board" class="btn">⚙ Customize</button><button id="new-task-view" class="btn primary">＋ Add task</button></div>`)}
+  return `${pageHeading("Task board",`Drag tasks and lists to organize ${esc(state.project.name)}.`,`<div class="board-actions"><button id="export-board-pdf" class="btn">Download PDF</button><button id="ai-plan-tasks" class="btn ai-btn">AI plan</button><button id="customize-board" class="btn">⚙ Customize</button><button id="new-task-view" class="btn primary">＋ Add task</button></div>`)}
     <div class="toolbar">${projectSelector()}${state.board?.framework==="scrum"?`<select id="sprint-filter"><option value="">All Scrum work</option><option value="backlog">Product backlog</option>${state.sprints.map(s=>`<option value="${s.id}">${s.is_active?"● ":""}${esc(s.name)}</option>`).join("")}</select>`:""}<span class="framework-pill">${pretty(state.board?.framework||"kanban")} board</span></div>
     <div class="board-wrap"><div class="kanban custom-board" style="grid-template-columns:repeat(${columns.length + 1}, minmax(275px, 1fr))">${columns.map(column=>kanbanColumn(column,tasksForColumn(column.id))).join("")}<button id="add-column" class="add-column">＋ Add another list</button></div></div>`;
 }
@@ -316,7 +344,7 @@ function ganttView() {
     return `<div class="gantt-row" data-task="${task.id}"><div class="gantt-task-name"><strong>${esc(task.title)}</strong><small>${pretty(task.status)} · ${task.progress}%</small></div><div class="gantt-track" style="--days:${totalDays}"><div class="gantt-bar ${task.status}" style="--start:${offset};--duration:${Math.min(duration,totalDays-offset)}"><span>${esc(task.title)}</span><b>${task.progress}%</b></div></div></div>`;
   }).join("");
   const unscheduled=state.tasks.filter(task=>!(task.start_at||task.start_date)||!(task.end_at||task.due_date));
-  return `${pageHeading("Gantt chart",`Timeline planning for ${esc(state.project.name)}.`,`<button id="gantt-new-task" class="btn primary">＋ Schedule task</button>`)}
+  return `${pageHeading("Gantt chart",`Timeline planning for ${esc(state.project.name)}.`,`<div class="board-actions"><button id="export-gantt-pdf" class="btn">Download PDF</button><button id="gantt-new-task" class="btn primary">＋ Schedule task</button></div>`)}
     <div class="toolbar">${projectSelector()}<span class="gantt-range">${date(rangeStart)} — ${date(rangeEnd)}</span></div>
     <section class="gantt-panel"><div class="gantt-header"><div>Task</div><div class="gantt-days" style="--days:${totalDays}">${days.map(day=>`<span class="${day.getTime()===today.getTime()?"today":""}"><b>${day.toLocaleDateString(undefined,{weekday:"short"})}</b>${day.getDate()}</span>`).join("")}</div></div>
     <div class="gantt-body">${rows||`<div class="empty gantt-empty"><strong>No scheduled tasks</strong><span>Add a start and end date-time to a task.</span></div>`}</div></section>
@@ -354,6 +382,8 @@ function bindView() {
   $("#add-column")?.addEventListener("click",()=>columnModal());
   $("#customize-board")?.addEventListener("click",boardSettingsModal);
   $("#ai-plan-tasks")?.addEventListener("click",aiTaskPlannerModal);
+  $("#export-board-pdf")?.addEventListener("click",exportBoardPdf);
+  $("#export-gantt-pdf")?.addEventListener("click",exportGanttPdf);
   bindBoardDragDrop();
   $("#project-search")?.addEventListener("input", filterProjects); $("#project-filter")?.addEventListener("change", filterProjects);
 }
@@ -604,7 +634,7 @@ async function taskDetail(id){
       $("#edit-task").onclick=()=>taskModal(task);
       $("#detail-delete-task").onclick=()=>deleteTask(task);
       $$("[data-check]").forEach(input=>input.onchange=async()=>{await api(`/tasks/${id}/checklist/${input.dataset.check}`,{method:"PATCH",body:JSON.stringify({is_done:input.checked})});taskDetail(id)});
-      $$("[data-delete-check]").forEach(button=>button.onclick=async()=>{await api(`/tasks/${id}/checklist/${button.dataset.deleteCheck}`,{method:"DELETE"});taskDetail(id)});
+      $$("[data-delete-check]").forEach(button=>button.onclick=async()=>{if(!confirm("Delete this checklist item?"))return;await api(`/tasks/${id}/checklist/${button.dataset.deleteCheck}`,{method:"DELETE"});taskDetail(id)});
       $("#checklist-form").onsubmit=async e=>{e.preventDefault();const input=$("input",e.target);await api(`/tasks/${id}/checklist`,{method:"POST",body:JSON.stringify({text:input.value})});taskDetail(id)};
       $("#comment-form").onsubmit=async e=>{e.preventDefault();const input=$("input",e.target);await api(`/tasks/${id}/comments`,{method:"POST",body:JSON.stringify({body:input.value})});closeModal();taskDetail(id);toast("Comment added")};
     });

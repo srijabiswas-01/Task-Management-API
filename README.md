@@ -46,6 +46,7 @@ The included responsive frontend provides:
 - Automatic two-way synchronization between task status and board list
 - Multiple task assignees and start/end date-time scheduling
 - Project Gantt chart with scheduled and unscheduled task views
+- PDF-only downloads for task boards and Gantt charts
 - Trello-style task checklists with automatic completion progress
 - Persistent light and dark themes with responsive, accessible UI styling
 - Task creation, editing, deletion, and comments

@@ -88,6 +88,45 @@ def test_core_project_flow(client: TestClient, auth_headers: dict[str, str]):
     assert dashboard.json()["completion_percent"] == 100
 
 
+def test_editing_task_details_preserves_its_board_position(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    workspace_id = client.post(
+        "/workspaces",
+        json={"name": "Stable board workspace"},
+        headers=auth_headers,
+    ).json()["id"]
+    project_id = client.post(
+        f"/workspaces/{workspace_id}/projects",
+        json={"name": "Stable board project"},
+        headers=auth_headers,
+    ).json()["id"]
+    task_ids = [
+        client.post(
+            f"/projects/{project_id}/tasks",
+            json={"title": title},
+            headers=auth_headers,
+        ).json()["id"]
+        for title in ("First task", "Middle task", "Last task")
+    ]
+    board_before = client.get(
+        f"/projects/{project_id}/board", headers=auth_headers
+    ).json()
+    middle_position = board_before["task_positions"][str(task_ids[1])]
+
+    updated = client.patch(
+        f"/tasks/{task_ids[1]}",
+        json={"title": "Edited middle task", "status": "backlog"},
+        headers=auth_headers,
+    )
+
+    assert updated.status_code == 200
+    board_after = client.get(
+        f"/projects/{project_id}/board", headers=auth_headers
+    ).json()
+    assert board_after["task_positions"][str(task_ids[1])] == middle_position
+
+
 def test_custom_board_and_drag_positions(
     client: TestClient, auth_headers: dict[str, str]
 ):
@@ -301,6 +340,17 @@ def test_task_collaboration_schedule_checklist_and_status_sync(
     task_id = task.json()["id"]
     assert set(task.json()["assignee_ids"]) == {me_id, teammate["id"]}
     assert task.json()["start_at"].startswith("2026-08-01T09:30:00")
+
+    updated_task = client.patch(
+        f"/tasks/{task_id}",
+        json={"assignee_ids": [me_id, teammate["id"]]},
+        headers=auth_headers,
+    )
+    assert updated_task.status_code == 200
+    assert set(updated_task.json()["assignee_ids"]) == {
+        me_id,
+        teammate["id"],
+    }
 
     item = client.post(
         f"/tasks/{task_id}/checklist",
