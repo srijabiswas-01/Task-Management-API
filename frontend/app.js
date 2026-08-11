@@ -33,32 +33,29 @@ function isAdmin() { return state.members.find(m => m.user_id === state.user?.id
 function date(value) { return value ? new Date(value).toLocaleDateString(undefined, {month:"short", day:"numeric", year:"numeric"}) : "Not set"; }
 function dateTime(value) { return value ? new Date(value).toLocaleString(undefined, {month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"}) : "Not set"; }
 function pdfText(value="") { return String(value).normalize("NFKD").replace(/[^\x20-\x7E]/g," ").replace(/\\/g,"\\\\").replace(/\(/g,"\\(").replace(/\)/g,"\\)"); }
-function downloadPdf(title,lines,fileName){
-  const pages=[];
-  for(let index=0;index<Math.max(1,lines.length);index+=44)pages.push(lines.slice(index,index+44));
-  const objects=[null,null,null,"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"],pageIds=[];
-  pages.forEach(linesForPage=>{
-    const pageId=objects.length,contentId=pageId+1;pageIds.push(pageId);
-    const commands=["BT","/F1 16 Tf",`50 800 Td (${pdfText(title)}) Tj`,"/F1 9 Tf"];
-    linesForPage.forEach((line,index)=>commands.push(`0 -${index===0?28:16} Td (${pdfText(line)}) Tj`));commands.push("ET");
-    const stream=commands.join("\n");
-    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Rotate 90 /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`);
-    objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
-  });
+const PDF_W=842,PDF_H=595;
+function pdfColor(hex){const value=hex?.match(/^#([0-9a-f]{6})$/i)?.[1]||"17233c";return [0,2,4].map(i=>(parseInt(value.slice(i,i+2),16)/255).toFixed(3)).join(" ")}
+function pdfRect(x,y,w,h,fill="#ffffff",stroke=null){return `${pdfColor(fill)} rg${stroke?` ${pdfColor(stroke)} RG`:""} ${x} ${PDF_H-y-h} ${w} ${h} re ${stroke?"B":"f"}`}
+function pdfLine(x1,y1,x2,y2,color="#e4e9f1",width=.6){return `${pdfColor(color)} RG ${width} w ${x1} ${PDF_H-y1} m ${x2} ${PDF_H-y2} l S`}
+function pdfLabel(value,x,y,size=9,color="#17233c",bold=false,maxWidth=0){let text=String(value??"");if(maxWidth){const limit=Math.max(1,Math.floor(maxWidth/(size*.52)));if(text.length>limit)text=text.slice(0,Math.max(1,limit-1))+"…"}return `BT ${pdfColor(color)} rg /F${bold?2:1} ${size} Tf ${x} ${PDF_H-y-size} Td (${pdfText(text)}) Tj ET`}
+function downloadVisualPdf(pages,fileName){
+  const objects=[null,null,null,"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>","<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>"],pageIds=[];
+  pages.forEach(commands=>{const pageId=objects.length,contentId=pageId+1,stream=commands.join("\n");pageIds.push(pageId);objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PDF_W} ${PDF_H}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>`);objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`)});
   objects[1]="<< /Type /Catalog /Pages 2 0 R >>";objects[2]=`<< /Type /Pages /Kids [${pageIds.map(id=>`${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`;
-  let pdf="%PDF-1.4\n",offsets=[0];
-  for(let id=1;id<objects.length;id++){offsets[id]=pdf.length;pdf+=`${id} 0 obj\n${objects[id]}\nendobj\n`}
-  const xref=pdf.length;pdf+=`xref\n0 ${objects.length}\n0000000000 65535 f \n${offsets.slice(1).map(offset=>String(offset).padStart(10,"0")+" 00000 n ").join("\n")}\ntrailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  let pdf="%PDF-1.4\n",offsets=[0];for(let id=1;id<objects.length;id++){offsets[id]=pdf.length;pdf+=`${id} 0 obj\n${objects[id]}\nendobj\n`}const xref=pdf.length;pdf+=`xref\n0 ${objects.length}\n0000000000 65535 f \n${offsets.slice(1).map(offset=>String(offset).padStart(10,"0")+" 00000 n ").join("\n")}\ntrailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
   const link=document.createElement("a");link.href=URL.createObjectURL(new Blob([pdf],{type:"application/pdf"}));link.download=`${fileName}.pdf`;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);
 }
+function pdfPageHeader(title,subtitle,page){return [pdfRect(0,0,PDF_W,PDF_H,"#f6f8fc"),pdfLabel("ORBIT",32,22,9,"#526dff",true),pdfLabel(title,32,38,20,"#17233c",true,650),pdfLabel(subtitle,32,64,9,"#71809c",false,650),pdfLabel(`Page ${page}`,755,34,8,"#71809c")];}
 function safeFileName(value){return String(value||"export").trim().replace(/[^a-z0-9_-]+/gi,"-").replace(/^-+|-+$/g,"").toLowerCase()||"export"}
 function exportBoardPdf(){
-  const lines=[];(state.board?.columns||[]).forEach(column=>{const tasks=tasksForColumn(column.id);lines.push(`${column.name} (${tasks.length})`);tasks.forEach((task,index)=>lines.push(`  ${index+1}. ${task.title} | ${pretty(task.priority)} | ${task.progress}% | Due: ${date(task.end_at||task.due_date)}`));lines.push("")});
-  downloadPdf(`${state.project.name} - Task Board`,lines,`${safeFileName(state.project.name)}-board`);toast("Board PDF downloaded");
+  const columns=state.board?.columns||[],groups=[];for(let i=0;i<Math.max(1,columns.length);i+=4)groups.push(columns.slice(i,i+4));const pages=[];
+  groups.forEach(group=>{const maxTasks=Math.max(1,...group.map(c=>tasksForColumn(c.id).length));for(let offset=0;offset<maxTasks;offset+=6){const page=pdfPageHeader(`${state.project.name} — Task Board`,`${pretty(state.board?.framework||"kanban")} board · ${state.tasks.length} tasks`,pages.length+1),gap=10,colW=(778-gap*Math.max(0,group.length-1))/Math.max(1,group.length);group.forEach((column,index)=>{const x=32+index*(colW+gap),tasks=tasksForColumn(column.id),slice=tasks.slice(offset,offset+6);page.push(pdfRect(x,92,colW,34,"#edf0f6","#e4e9f1"),pdfRect(x+10,104,8,8,column.color||"#8b97ac"),pdfLabel(column.name,x+25,101,10,"#17233c",true,colW-65),pdfLabel(String(tasks.length),x+colW-24,101,9,"#71809c",true));slice.forEach((task,row)=>{const y=136+row*68;color=task.priority==="high"||task.priority==="critical"?"#df5261":task.priority==="medium"?"#e59a29":"#23a06b";page.push(pdfRect(x,y,colW,58,"#ffffff","#e4e9f1"),pdfRect(x+10,y+10,6,6,color),pdfLabel(pretty(task.priority),x+22,y+7,7,"#71809c",true,colW-35),pdfLabel(task.title,x+10,y+21,9,"#17233c",true,colW-20),pdfLabel(task.due_date?`Due ${date(task.due_date)}`:`${task.progress}% complete`,x+10,y+39,7,"#71809c",false,colW-20));if(task.progress){page.push(pdfRect(x+10,y+51,colW-20,3,"#e4e9f1"),pdfRect(x+10,y+51,(colW-20)*task.progress/100,3,"#526dff"))}});if(!slice.length)page.push(pdfLabel(offset?"No more tasks":"No tasks",x+12,150,8,"#71809c"))});pages.push(page)}});
+  downloadVisualPdf(pages,`${safeFileName(state.project.name)}-task-board`);toast("Board chart PDF downloaded");
 }
 function exportGanttPdf(){
-  const lines=state.tasks.filter(task=>(task.start_at||task.start_date)&&(task.end_at||task.due_date)).map((task,index)=>`${index+1}. ${task.title} | ${dateTime(task.start_at||task.start_date)} - ${dateTime(task.end_at||task.due_date)} | ${pretty(task.status)} | ${task.progress}%`);if(!lines.length)lines.push("No scheduled tasks.");
-  downloadPdf(`${state.project.name} - Gantt Chart`,lines,`${safeFileName(state.project.name)}-gantt-chart`);toast("Gantt chart PDF downloaded");
+  const scheduled=state.tasks.map(task=>{const start=task.start_at||task.start_date,end=task.end_at||task.due_date;return start&&end?{task,start:new Date(start),end:new Date(end)}:null}).filter(Boolean).sort((a,b)=>a.start-b.start);let rangeStart=new Date();rangeStart.setHours(0,0,0,0);rangeStart.setDate(rangeStart.getDate()-3),rangeEnd=new Date(rangeStart);rangeEnd.setDate(rangeEnd.getDate()+30);if(scheduled.length){rangeStart=new Date(Math.min(rangeStart,...scheduled.map(x=>x.start)));rangeStart.setHours(0,0,0,0);rangeEnd=new Date(Math.max(rangeEnd,...scheduled.map(x=>x.end)))}const totalDays=Math.min(120,Math.max(1,Math.ceil((rangeEnd-rangeStart)/86400000)+1)),pages=[];
+  const taskGroups=scheduled.length?Array.from({length:Math.ceil(scheduled.length/11)},(_,i)=>scheduled.slice(i*11,i*11+11)):[[]];for(let dayOffset=0;dayOffset<totalDays;dayOffset+=21){const dayCount=Math.min(21,totalDays-dayOffset);taskGroups.forEach(group=>{const page=pdfPageHeader(`${state.project.name} — Gantt Chart`,`${date(new Date(rangeStart.getTime()+dayOffset*86400000))} — ${date(new Date(rangeStart.getTime()+(dayOffset+dayCount-1)*86400000))}`,pages.length+1),nameW=185,gridX=217,gridW=593,dayW=gridW/dayCount,rowY=125,rowH=36;page.push(pdfRect(32,92,778,33,"#edf0f6","#e4e9f1"),pdfLabel("Task",42,103,9,"#17233c",true));for(let d=0;d<dayCount;d++){const current=new Date(rangeStart.getTime()+(dayOffset+d)*86400000),x=gridX+d*dayW;page.push(pdfLine(x,92,x,rowY+Math.max(1,group.length)*rowH,"#d9dfeb"),pdfLabel(current.toLocaleDateString(undefined,{month:"short"}),x+3,97,6,"#71809c",true,dayW-3),pdfLabel(current.getDate(),x+3,108,7,"#17233c",false,dayW-3))}group.forEach(({task,start,end},row)=>{const y=rowY+row*rowH;page.push(pdfRect(32,y,778,rowH,"#ffffff","#e4e9f1"),pdfLabel(task.title,42,y+8,8,"#17233c",true,nameW-20),pdfLabel(`${pretty(task.status)} · ${task.progress}%`,42,y+21,6,"#71809c",false,nameW-20));const startIndex=Math.floor((start-rangeStart)/86400000),endIndex=Math.max(startIndex,Math.ceil((end-rangeStart)/86400000)),visibleStart=Math.max(startIndex,dayOffset),visibleEnd=Math.min(endIndex+1,dayOffset+dayCount);if(visibleEnd>visibleStart){const colors={done:"#23a06b",in_progress:"#e59a29",review:"#8557d8",testing:"#8557d8"},barX=gridX+(visibleStart-dayOffset)*dayW+2,barW=Math.max(5,(visibleEnd-visibleStart)*dayW-4);page.push(pdfRect(barX,y+9,barW,18,colors[task.status]||"#526dff"),pdfLabel(`${task.progress}%`,barX+5,y+14,6,"#ffffff",true,barW-8))}});if(!group.length)page.push(pdfLabel("No scheduled tasks",42,145,10,"#71809c",true));pages.push(page)})}
+  downloadVisualPdf(pages,`${safeFileName(state.project.name)}-gantt-chart`);toast("Gantt chart PDF downloaded");
 }
 function inputDateTime(value) {
   if (!value) return "";
@@ -364,17 +361,15 @@ function sprintsView() {
     <div class="toolbar">${projectSelector()}</div>
     ${state.sprints.length?state.sprints.map(s=>`<article class="sprint-row"><div><h3>${esc(s.name)} ${s.is_active?'<span class="badge active">Active sprint</span>':""}</h3><p>${esc(s.goal||"No sprint goal")}</p></div><div class="sprint-dates">${date(s.start_date)} → ${date(s.end_date)}<button data-edit-sprint="${s.id}" class="icon-btn" title="Edit sprint">•••</button></div></article>`).join(""):emptyMini("No sprints yet","Create a sprint to group focused work.")}`;
 }
-function peopleView() {
-  return `${pageHeading("People & teams","Bring everyone together around shared work.",`<button id="add-member" class="btn primary">＋ Add member</button>`)}
-  <div class="people-grid"><section class="panel"><div class="panel-header"><h3>Workspace members</h3><span class="badge">${state.members.length}</span></div>
-    ${state.members.map(m=>`<div class="member-row"><b class="avatar">${esc(m.user.name.slice(0,2).toUpperCase())}</b><div><strong>${esc(m.user.name)}</strong><small>${esc(m.user.email)}</small></div><span class="badge ${m.role}">${m.role}</span></div>`).join("")}
-  </section><section class="panel"><div class="panel-header"><h3>Teams</h3><button id="new-team">＋ New team</button></div>
-    ${state.teams.length?state.teams.map(t=>`<div class="team-card"><h4>${esc(t.name)}</h4><p>${esc(t.description||"No description")}</p></div>`).join(""):emptyMini("No teams yet","Create a team for a focused group.")}
-  </section></div>`;
-}
 function bindView() {
   $$("[data-go]").forEach(x=>x.onclick=()=>navigate(x.dataset.go));
-  $$("[data-project]").forEach(x=>x.onclick=async()=>{state.project=state.projects.find(p=>p.id===Number(x.dataset.project));localStorage.setItem(`orbit_project_${state.workspace.id}`,state.project.id);await loadProject();if(x.closest(".project-card"))navigate("board");else render()});
+  $$("[data-project]").forEach(x=>x.onclick=async()=>{
+    const project=state.projects.find(p=>p.id===Number(x.dataset.project));
+    if(!project)return;
+    state.project=project;
+    localStorage.setItem(`orbit_project_${state.workspace.id}`,state.project.id);
+    try{await loadProject();navigate("board")}catch(err){toast(`Could not open project: ${err.message}`,true)}
+  });
   $$("[data-edit-project]").forEach(button=>button.onclick=event=>{event.stopPropagation();projectEditModal(state.projects.find(project=>project.id===Number(button.dataset.editProject)))});
   $("#new-project")?.addEventListener("click", projectModal); $("#new-task-view")?.addEventListener("click",()=>taskModal());
   $("#gantt-new-task")?.addEventListener("click",()=>taskModal());
@@ -589,11 +584,23 @@ function sprintModal(sprint=null){modal(formShell(sprint?"Edit sprint":"Create a
   <label class="field full" style="flex-direction:row"><input name="is_active" type="checkbox" value="true" ${sprint?.is_active?"checked":""}> Make this the active sprint</label>`,sprint?"Save sprint":"Create sprint"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
     data.is_active=data.is_active==="true";await api(sprint?`/sprints/${sprint.id}`:`/projects/${state.project.id}/sprints`,{method:sprint?"PATCH":"POST",body:JSON.stringify(data)});await loadProject();render();toast(sprint?"Sprint updated":"Sprint created");
   }));}
-function taskModal(task=null,targetColumnId=null){modal(formShell(task?"Edit task":"Create a task",task?"Update task details and progress.":`Add work to ${esc(state.project.name)}.`,`
+function taskModal(task=null,targetColumnId=null){
+  const projectAllocations=state.teamMembers.filter(a=>a.project_id===state.project.id);
+  const assignmentTeams=state.teams;
+  const currentAssignees=task?.assignee_ids||[];
+  let selectedTeamId=assignmentTeams.find(team=>currentAssignees.some(userId=>projectAllocations.some(a=>a.team_id===team.id&&a.user_id===userId)))?.id||"";
+  const assigneeOptions=teamId=>{
+    if(!teamId)return `<span class="subtitle">Select a team to see its allocated project members.</span>`;
+    const userIds=[...new Set(projectAllocations.filter(a=>a.team_id===Number(teamId)).map(a=>a.user_id))];
+    const members=userIds.map(id=>state.members.find(m=>m.user_id===id)).filter(Boolean);
+    return members.map(m=>`<label><input type="checkbox" name="assignee_ids" value="${m.user_id}" ${currentAssignees.includes(m.user_id)?"checked":""}><span class="avatar">${esc(m.user.name.slice(0,2).toUpperCase())}</span><span>${esc(m.user.name)}<small>${esc(projectAllocations.find(a=>a.team_id===Number(teamId)&&a.user_id===m.user_id)?.designation||"")}</small></span></label>`).join("")||`<span class="subtitle">No members are allocated to this team for ${esc(state.project.name)}.</span>`;
+  };
+  modal(formShell(task?"Edit task":"Create a task",task?"Update task details and progress.":`Add work to ${esc(state.project.name)}.`,`
   ${field("title","Task title","text","What needs to be done?",true,false,task?.title)}${field("description","Description","textarea","Add context and acceptance criteria","",true,task?.description)}
   ${selectField("status","Status",STATUS.map(x=>x[0]),task?.status||"backlog")}${selectField("priority","Priority",["low","medium","high","critical"],task?.priority||"medium")}
   ${state.board?.framework==="scrum"?`<div class="field full"><label>Sprint · ${esc(state.project.name)}</label><div class="inline-control"><select name="sprint_id"><option value="">Product backlog</option>${state.sprints.map(s=>`<option value="${s.id}" ${s.id===task?.sprint_id?"selected":""}>${s.is_active?"● Active · ":""}${esc(s.name)}</option>`).join("")}</select><button type="button" id="show-quick-sprint" class="btn">＋ New sprint</button></div><div id="quick-sprint-row" class="quick-sprint-row hidden"><input id="quick-sprint-name" placeholder="Sprint name, e.g. Sprint 01"><button type="button" id="create-quick-sprint" class="btn primary">Create</button></div><small class="field-help">${state.sprints.length?`${state.sprints.length} sprint${state.sprints.length===1?"":"s"} in this project`:"No sprints yet — create one here or from the Sprints page."}</small></div>`:""}
-  <fieldset class="field full assignee-field"><legend>Assignees</legend><div class="assignee-options">${state.members.map(m=>`<label><input type="checkbox" name="assignee_ids" value="${m.user_id}" ${(task?.assignee_ids||[]).includes(m.user_id)?"checked":""}><span class="avatar">${esc(m.user.name.slice(0,2).toUpperCase())}</span>${esc(m.user.name)}</label>`).join("")||"<span class='subtitle'>Add workspace members before assigning this task.</span>"}</div></fieldset>
+  <label class="field full">Assignment team<select id="task-team-select" name="assignment_team_id"><option value="">Select a team first</option>${assignmentTeams.map(team=>`<option value="${team.id}" ${team.id===selectedTeamId?"selected":""}>${esc(team.name)}</option>`).join("")}</select><small class="field-help">Members must be allocated to this team and project before they can be assigned.</small></label>
+  <fieldset class="field full assignee-field"><legend>Assignees · select multiple</legend><div id="task-assignee-options" class="assignee-options">${assigneeOptions(selectedTeamId)}</div></fieldset>
   ${field("story_points","Story points","number","0–100","",false,task?.story_points)}${field("due_date","Due date","date","","",false,task?.due_date)}
   ${field("start_at","Start date & time","datetime-local","","",false,inputDateTime(task?.start_at))}${field("end_at","End date & time","datetime-local","","",false,inputDateTime(task?.end_at))}
   ${progressField(task?.progress??0)}`,task?"Save changes":"Create task",task?`<button type="button" id="delete-task" class="btn danger">Delete</button>`:""),()=>{
@@ -604,8 +611,13 @@ function taskModal(task=null,targetColumnId=null){modal(formShell(task?"Edit tas
       progress.style.setProperty("--progress",`${value}%`);
     };
     progress.addEventListener("input",updateProgress);updateProgress();
+    $("#task-team-select").addEventListener("change",event=>{
+      selectedTeamId=event.target.value;
+      $("#task-assignee-options").innerHTML=assigneeOptions(selectedTeamId);
+    });
     $("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
       data.assignee_ids=$$('input[name="assignee_ids"]:checked',e.currentTarget).map(input=>Number(input.value));
+      delete data.assignment_team_id;
       ["sprint_id","story_points","progress"].forEach(k=>{if(data[k]!==null)data[k]=Number(data[k])});
       const saved=await api(task?`/tasks/${task.id}`:`/projects/${state.project.id}/tasks`,{method:task?"PATCH":"POST",body:JSON.stringify(data)});
       if(!task&&targetColumnId) await api(`/tasks/${saved.id}/board-position`,{method:"PUT",body:JSON.stringify({column_id:targetColumnId,position:9999})});
@@ -800,7 +812,7 @@ function memberDetailsModal(userId){
 }
 
 function teamAllocationModal(teamId){
-  const eligible=state.members.filter(m=>m.role!=="admin");
+  const eligible=state.members;
   if(!eligible.length||!state.projects.length){toast("Add a member and create a project first",true);return}
   modal(formShell("Allocate team member","Choose their project and designation.",`${selectField("user_id","Member",eligible.map(m=>[m.user_id,m.user.name]))}${selectField("project_id","Project",state.projects.map(p=>[p.id,p.name]))}${field("designation","Designation","text","e.g. Mobile Developer",true,true)}`,"Allocate member"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
     data.user_id=Number(data.user_id);data.project_id=Number(data.project_id);
