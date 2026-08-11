@@ -14,7 +14,13 @@
 <body>
   <div id="toast" class="toast" aria-live="polite"></div>
 
-  <section id="auth-screen" class="auth-screen">
+  <div id="boot-screen" class="boot-screen" aria-live="polite">
+    <div class="brand"><span class="brand-mark">O</span> Orbit</div>
+    <span class="boot-spinner" aria-hidden="true"></span>
+    <p>Loading your workspace...</p>
+  </div>
+
+  <section id="auth-screen" class="auth-screen hidden">
     <div class="auth-brand">
       <a class="brand brand-light" href="#"><span class="brand-mark">O</span> Orbit</a>
       <div class="auth-copy">
@@ -72,8 +78,11 @@
         <div class="user-chip">
           <b id="user-avatar">U</b>
           <div><strong id="user-name">User</strong><small id="user-email"></small></div>
-          <button id="logout-button" title="Log out">↪</button>
         </div>
+        <button id="logout-button" class="logout-button" type="button" title="Log out of Orbit">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4M14 8l4 4-4 4M9 12h9"/></svg>
+          <span>Log out</span>
+        </button>
       </div>
     </aside>
 
@@ -101,6 +110,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=20260801-19"></script>
+  <script src="/static/app.js?v=20260811-21"></script>
 </body>
 </html>
