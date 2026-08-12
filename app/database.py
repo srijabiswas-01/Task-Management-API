@@ -11,7 +11,17 @@ connect_args = (
     else {}
 )
 
-engine = create_engine(settings.database_url, connect_args=connect_args)
+engine_options = {
+    "connect_args": connect_args,
+    # Validate pooled connections before use and retire them before common
+    # hosted-Postgres idle timeouts. Never include bound values in exceptions.
+    "pool_pre_ping": True,
+    "hide_parameters": True,
+}
+if not settings.database_url.startswith("sqlite"):
+    engine_options.update(pool_recycle=300, pool_use_lifo=True)
+
+engine = create_engine(settings.database_url, **engine_options)
 if settings.database_url.startswith("sqlite"):
     @event.listens_for(engine, "connect")
     def enable_sqlite_foreign_keys(dbapi_connection, _):

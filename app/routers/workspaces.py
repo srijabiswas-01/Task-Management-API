@@ -9,9 +9,11 @@ from app.dependencies import (
     require_workspace_member,
     require_team_admin,
 )
+from app.core.skills import normalize_skills, parse_skills
 from app.models import Comment, Department, Designation, Project, Task, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     MemberAdd,
+    MemberAccessUpdate,
     MemberRead,
     MemberProfessionalUpdate,
     DesignationCreate,
@@ -29,6 +31,7 @@ from app.schemas import (
     UserDirectoryRead,
     UserProfileRead,
     UserProfileUpdate,
+    SkillMemberRead,
     WorkspaceCreate,
     WorkspaceRead,
     WorkspaceUpdate,
@@ -43,6 +46,7 @@ def validate_team_manager(
     member = db.scalar(select(WorkspaceMember.id).where(
         WorkspaceMember.workspace_id == workspace_id,
         WorkspaceMember.user_id == user_id,
+        WorkspaceMember.is_active.is_(True),
     ))
     designation = db.scalar(select(Designation.id).where(
         Designation.workspace_id == workspace_id,
@@ -227,7 +231,10 @@ def list_workspaces(db: DB, current_user: CurrentUser) -> list[Workspace]:
         db.scalars(
             select(Workspace)
             .join(WorkspaceMember)
-            .where(WorkspaceMember.user_id == current_user.id)
+            .where(
+                WorkspaceMember.user_id == current_user.id,
+                WorkspaceMember.is_active.is_(True),
+            )
             .order_by(Workspace.created_at.desc())
         ).all()
     )
@@ -376,11 +383,94 @@ def user_directory(
     return [UserDirectoryRead(
         user_id=user.id, name=user.name, email=user.email, is_active=user.is_active,
         membership_id=memberships[user.id].id if user.id in memberships else None,
+        membership_is_active=memberships[user.id].is_active if user.id in memberships else None,
         role=memberships[user.id].role if user.id in memberships else None,
         professional_title=user.profile.professional_title if user.profile else None,
         department=user.profile.department if user.profile else None,
         projects=sorted(set(projects_by_user.get(user.id, []))),
     ) for user in users]
+
+
+@router.get("/{workspace_id}/skill-catalog", response_model=list[str])
+def skill_catalog(
+    workspace_id: int, db: DB, current_user: CurrentUser
+) -> list[str]:
+    require_workspace_member(db, workspace_id, current_user.id)
+    values = db.scalars(
+        select(UserProfile.skills).join(User).join(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.is_active.is_(True),
+        )
+    ).all()
+    catalog: dict[str, str] = {}
+    for value in values:
+        for skill in parse_skills(value):
+            catalog.setdefault(skill.casefold(), skill)
+    return sorted(catalog.values(), key=str.casefold)
+
+
+@router.get("/{workspace_id}/skill-members", response_model=list[SkillMemberRead])
+def skill_members(
+    workspace_id: int, db: DB, current_user: CurrentUser
+) -> list[SkillMemberRead]:
+    require_workspace_admin(db, workspace_id, current_user.id)
+    members = db.scalars(select(WorkspaceMember).options(
+        selectinload(WorkspaceMember.user).selectinload(User.profile)
+    ).where(
+        WorkspaceMember.workspace_id == workspace_id,
+        WorkspaceMember.is_active.is_(True),
+    ).order_by(WorkspaceMember.created_at)).all()
+    allocations = db.execute(
+        select(TeamMember.user_id, TeamMember.project_id)
+        .join(Team, Team.id == TeamMember.team_id)
+        .where(Team.workspace_id == workspace_id)
+        .distinct()
+    ).all()
+    projects_by_user: dict[int, list[int]] = {}
+    for user_id, project_id in allocations:
+        projects_by_user.setdefault(user_id, []).append(project_id)
+    all_project_ids = list(db.scalars(
+        select(Project.id).where(Project.workspace_id == workspace_id)
+    ).all())
+    return [SkillMemberRead(
+        user_id=member.user_id,
+        name=member.user.name,
+        email=member.user.email,
+        professional_title=member.professional_title,
+        department=member.department,
+        skills=parse_skills(member.user.profile.skills if member.user.profile else None),
+        project_ids=all_project_ids if member.role == WorkspaceRole.admin else projects_by_user.get(member.user_id, []),
+    ) for member in members]
+
+
+@router.patch("/{workspace_id}/members/{member_id}/access", response_model=MemberRead)
+def update_member_access(
+    workspace_id: int, member_id: int, payload: MemberAccessUpdate,
+    db: DB, current_user: CurrentUser,
+) -> WorkspaceMember:
+    require_workspace_admin(db, workspace_id, current_user.id)
+    member = db.scalar(select(WorkspaceMember).options(
+        selectinload(WorkspaceMember.user).selectinload(User.profile)
+    ).where(
+        WorkspaceMember.id == member_id,
+        WorkspaceMember.workspace_id == workspace_id,
+    ))
+    if member is None:
+        raise HTTPException(status_code=404, detail="Workspace member not found")
+    workspace = db.get(Workspace, workspace_id)
+    if member.user_id == current_user.id and (
+        payload.is_active is False or
+        (payload.role is not None and payload.role != member.role)
+    ):
+        raise HTTPException(status_code=409, detail="You cannot change your own access")
+    if payload.role is not None and workspace.owner_id == member.user_id:
+        raise HTTPException(status_code=409, detail="The workspace owner must remain an admin")
+    if payload.is_active is not None:
+        member.is_active = payload.is_active
+    if payload.role is not None:
+        member.role = payload.role
+    db.commit(); db.refresh(member)
+    return member
 
 
 @router.patch("/{workspace_id}/users/{user_id}/approve", response_model=UserRead)
@@ -455,6 +545,55 @@ def admin_profile_response(db: DB, user: User) -> UserProfileRead:
     )
 
 
+def update_admin_managed_profile(
+    db: DB, workspace_id: int, user: User, payload: UserProfileUpdate
+) -> UserProfileRead:
+    if payload.professional_title and db.scalar(select(Designation.id).where(
+        Designation.workspace_id == workspace_id,
+        Designation.name == payload.professional_title,
+    )) is None:
+        raise HTTPException(status_code=400, detail="Select a valid designation")
+    if payload.department and db.scalar(select(Department.id).where(
+        Department.workspace_id == workspace_id,
+        Department.name == payload.department,
+    )) is None:
+        raise HTTPException(status_code=400, detail="Select a valid department")
+    user.name = payload.name.strip()
+    profile = db.scalar(select(UserProfile).where(UserProfile.user_id == user.id))
+    if profile is None:
+        profile = UserProfile(user_id=user.id)
+        db.add(profile)
+    for field, value in payload.model_dump(exclude={"name"}).items():
+        if field == "skills":
+            value = normalize_skills(value)
+        setattr(profile, field, value.strip() if isinstance(value, str) and field != "profile_image" else value)
+    db.commit(); db.refresh(user)
+    return admin_profile_response(db, user)
+
+
+@router.get("/{workspace_id}/users/{user_id}/profile", response_model=UserProfileRead)
+def get_registered_user_profile(
+    workspace_id: int, user_id: int, db: DB, current_user: CurrentUser
+) -> UserProfileRead:
+    require_workspace_admin(db, workspace_id, current_user.id)
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Registered user not found")
+    return admin_profile_response(db, user)
+
+
+@router.put("/{workspace_id}/users/{user_id}/profile", response_model=UserProfileRead)
+def update_registered_user_profile(
+    workspace_id: int, user_id: int, payload: UserProfileUpdate,
+    db: DB, current_user: CurrentUser,
+) -> UserProfileRead:
+    require_workspace_admin(db, workspace_id, current_user.id)
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Registered user not found")
+    return update_admin_managed_profile(db, workspace_id, user, payload)
+
+
 @router.get("/{workspace_id}/members/{member_id}/profile", response_model=UserProfileRead)
 def get_member_profile(
     workspace_id: int, member_id: int, db: DB, current_user: CurrentUser
@@ -512,7 +651,7 @@ def permanently_delete_user(
         WorkspaceMember.user_id == user_id,
     ))
     user = db.get(User, user_id)
-    if user is None or (user.is_active and membership is None):
+    if user is None:
         raise HTTPException(status_code=404, detail="Workspace user not found")
     if db.scalar(select(Workspace.id).where(Workspace.owner_id == user_id)):
         raise HTTPException(status_code=409, detail="Transfer workspace ownership before deleting this user")
@@ -679,6 +818,7 @@ def allocate_team_member(
         select(WorkspaceMember).where(
             WorkspaceMember.workspace_id == workspace_id,
             WorkspaceMember.user_id == payload.user_id,
+            WorkspaceMember.is_active.is_(True),
         )
     )
     project = db.scalar(

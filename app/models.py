@@ -133,6 +133,7 @@ class WorkspaceMember(TimestampMixin, Base):
     role: Mapped[WorkspaceRole] = mapped_column(
         SqlEnum(WorkspaceRole), default=WorkspaceRole.member
     )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     workspace: Mapped["Workspace"] = relationship(back_populates="members")
     user: Mapped["User"] = relationship(back_populates="memberships")

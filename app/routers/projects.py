@@ -26,6 +26,7 @@ def validate_project_manager(db: DB, workspace_id: int, user_id: int) -> None:
         WorkspaceMember.workspace_id == workspace_id,
         WorkspaceMember.user_id == user_id,
         WorkspaceMember.role == WorkspaceRole.admin,
+        WorkspaceMember.is_active.is_(True),
     ))
     if manager is None:
         raise HTTPException(status_code=400, detail="Project manager must be a workspace admin")

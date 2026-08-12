@@ -5,6 +5,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, select
 
 from app.core.security import create_access_token, hash_password, verify_password
+from app.core.skills import normalize_skills
 from app.dependencies import CurrentUser, DB
 from app.models import Department, Designation, Project, TeamMember, User, UserProfile, WorkspaceMember
 from app.schemas import Token, UserProfileRead, UserProfileUpdate, UserRead, UserRegister
@@ -115,6 +116,8 @@ def update_profile(
         profile = UserProfile(user_id=current_user.id)
         db.add(profile)
     for field, value in payload.model_dump(exclude={"name"}).items():
+        if field == "skills":
+            value = normalize_skills(value)
         setattr(profile, field, value.strip() if isinstance(value, str) and field != "profile_image" else value)
     db.commit()
     db.refresh(current_user)

@@ -107,6 +107,19 @@ def test_registration_requires_admin_approval(client: TestClient, auth_headers: 
     ).json()
     assert next(user for user in directory if user["email"] == "pending@example.com")["is_active"] is False
 
+    profile = client.get(
+        f"/workspaces/{workspace_id}/users/{pending.json()['id']}/profile",
+        headers=auth_headers,
+    )
+    assert profile.status_code == 200
+    edited_profile = client.put(
+        f"/workspaces/{workspace_id}/users/{pending.json()['id']}/profile",
+        json={"name": "Pending User Updated"},
+        headers=auth_headers,
+    )
+    assert edited_profile.status_code == 200
+    assert edited_profile.json()["name"] == "Pending User Updated"
+
     approved = client.patch(
         f"/workspaces/{workspace_id}/users/{pending.json()['id']}/approve",
         headers=auth_headers,
@@ -687,6 +700,40 @@ def test_team_allocation_controls_member_collaboration_access(
     assert len(client.get(
         f"/workspaces/{workspace_id}/projects", headers=member_headers
     ).json()) == 2
+    deactivated = client.patch(
+        f"/workspaces/{workspace_id}/members/{workspace_member['id']}/access",
+        json={"is_active": False},
+        headers=auth_headers,
+    )
+    assert deactivated.status_code == 200
+    assert deactivated.json()["is_active"] is False
+    assert client.get(
+        f"/workspaces/{workspace_id}/projects", headers=member_headers
+    ).status_code == 403
+    assert client.get("/workspaces", headers=member_headers).json() == []
+    reactivated = client.patch(
+        f"/workspaces/{workspace_id}/members/{workspace_member['id']}/access",
+        json={"is_active": True},
+        headers=auth_headers,
+    )
+    assert reactivated.status_code == 200
+    promoted = client.patch(
+        f"/workspaces/{workspace_id}/members/{workspace_member['id']}/access",
+        json={"role": "admin"},
+        headers=auth_headers,
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["role"] == "admin"
+    demoted = client.patch(
+        f"/workspaces/{workspace_id}/members/{workspace_member['id']}/access",
+        json={"role": "member"},
+        headers=auth_headers,
+    )
+    assert demoted.status_code == 200
+    assert demoted.json()["role"] == "member"
+    assert client.get(
+        f"/workspaces/{workspace_id}/projects", headers=member_headers
+    ).status_code == 200
     assert client.delete(
         f"/workspaces/{workspace_id}/users/{teammate['id']}",
         headers=auth_headers,
@@ -700,6 +747,23 @@ def test_current_user_profile_and_project_history(
     workspace_id = client.post(
         "/workspaces", json={"name": "Profile workspace"}, headers=auth_headers
     ).json()["id"]
+    profile_update = client.put(
+        "/auth/profile",
+        json={"name": "Test User", "skills": "Python, SQL, python, FastAPI\nDocker"},
+        headers=auth_headers,
+    )
+    assert profile_update.status_code == 200
+    assert profile_update.json()["skills"] == "Python, SQL, FastAPI, Docker"
+    catalog = client.get(
+        f"/workspaces/{workspace_id}/skill-catalog", headers=auth_headers
+    )
+    assert catalog.status_code == 200
+    assert catalog.json() == ["Docker", "FastAPI", "Python", "SQL"]
+    skill_members = client.get(
+        f"/workspaces/{workspace_id}/skill-members", headers=auth_headers
+    )
+    assert skill_members.status_code == 200
+    assert skill_members.json()[0]["skills"] == ["Python", "SQL", "FastAPI", "Docker"]
     project = client.post(
         f"/workspaces/{workspace_id}/projects",
         json={"name": "Profile project"},

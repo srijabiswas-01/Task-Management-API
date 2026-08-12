@@ -75,6 +75,7 @@ class MemberRead(ORMModel):
     workspace_id: int
     user_id: int
     role: WorkspaceRole
+    is_active: bool
     user: UserRead
     professional_title: str | None = None
     department: str | None = None
@@ -85,16 +86,32 @@ class MemberProfessionalUpdate(BaseModel):
     department: str | None = Field(default=None, max_length=150)
 
 
+class MemberAccessUpdate(BaseModel):
+    is_active: bool | None = None
+    role: WorkspaceRole | None = None
+
+
 class UserDirectoryRead(BaseModel):
     user_id: int
     name: str
     email: EmailStr
     is_active: bool
     membership_id: int | None = None
+    membership_is_active: bool | None = None
     role: WorkspaceRole | None = None
     professional_title: str | None = None
     department: str | None = None
     projects: list[str] = Field(default_factory=list)
+
+
+class SkillMemberRead(BaseModel):
+    user_id: int
+    name: str
+    email: EmailStr
+    professional_title: str | None = None
+    department: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    project_ids: list[int] = Field(default_factory=list)
 
 
 class DesignationCreate(BaseModel):

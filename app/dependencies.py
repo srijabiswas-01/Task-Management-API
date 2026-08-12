@@ -50,6 +50,8 @@ def require_workspace_member(
     )
     if membership is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    if not membership.is_active:
+        raise HTTPException(status_code=403, detail="Your workspace access is inactive")
     return membership
 
 
