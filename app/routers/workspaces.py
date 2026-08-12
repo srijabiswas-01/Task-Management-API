@@ -25,6 +25,7 @@ from app.schemas import (
     TeamCreate,
     TeamUpdate,
     TeamMemberAdd,
+    TeamMemberUpdate,
     TeamMemberRead,
     TeamRead,
     UserRead,
@@ -387,6 +388,7 @@ def user_directory(
         role=memberships[user.id].role if user.id in memberships else None,
         professional_title=user.profile.professional_title if user.profile else None,
         department=user.profile.department if user.profile else None,
+        profile_image=user.profile.profile_image if user.profile else None,
         projects=sorted(set(projects_by_user.get(user.id, []))),
     ) for user in users]
 
@@ -438,6 +440,7 @@ def skill_members(
         email=member.user.email,
         professional_title=member.professional_title,
         department=member.department,
+        profile_image=member.user.profile.profile_image if member.user.profile else None,
         skills=parse_skills(member.user.profile.skills if member.user.profile else None),
         project_ids=all_project_ids if member.role == WorkspaceRole.admin else projects_by_user.get(member.user_id, []),
     ) for member in members]
@@ -860,6 +863,49 @@ def allocate_team_member(
         )
         .where(TeamMember.id == allocation.id)
     )
+
+
+@router.patch(
+    "/{workspace_id}/teams/{team_id}/members/{allocation_id}",
+    response_model=TeamMemberRead,
+)
+def update_team_member_allocation(
+    workspace_id: int, team_id: int, allocation_id: int,
+    payload: TeamMemberUpdate, db: DB, current_user: CurrentUser,
+) -> TeamMember:
+    team = require_team_admin(db, team_id, current_user.id)
+    if team.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="Team not found")
+    allocation = db.scalar(select(TeamMember).where(
+        TeamMember.id == allocation_id, TeamMember.team_id == team_id
+    ))
+    if allocation is None:
+        raise HTTPException(status_code=404, detail="Team member allocation not found")
+    project = db.scalar(select(Project).where(
+        Project.id == payload.project_id, Project.workspace_id == workspace_id
+    ))
+    designation = db.scalar(select(Designation).where(
+        Designation.workspace_id == workspace_id,
+        Designation.name == payload.designation.strip(),
+    ))
+    if project is None:
+        raise HTTPException(status_code=400, detail="Select a valid workspace project")
+    if designation is None:
+        raise HTTPException(status_code=400, detail="Select a valid workspace designation")
+    duplicate = db.scalar(select(TeamMember.id).where(
+        TeamMember.team_id == team_id,
+        TeamMember.user_id == allocation.user_id,
+        TeamMember.project_id == project.id,
+        TeamMember.id != allocation.id,
+    ))
+    if duplicate is not None:
+        raise HTTPException(status_code=409, detail="Member is already allocated to this project")
+    allocation.project_id = project.id
+    allocation.designation = designation.name
+    db.commit()
+    return db.scalar(select(TeamMember).options(
+        selectinload(TeamMember.user), selectinload(TeamMember.project)
+    ).where(TeamMember.id == allocation.id))
 
 
 @router.delete(

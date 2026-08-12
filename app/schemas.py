@@ -20,6 +20,7 @@ class UserRead(ORMModel):
     name: str
     email: EmailStr
     is_active: bool
+    profile_image: str | None = None
     created_at: datetime
 
 
@@ -101,6 +102,7 @@ class UserDirectoryRead(BaseModel):
     role: WorkspaceRole | None = None
     professional_title: str | None = None
     department: str | None = None
+    profile_image: str | None = None
     projects: list[str] = Field(default_factory=list)
 
 
@@ -110,6 +112,7 @@ class SkillMemberRead(BaseModel):
     email: EmailStr
     professional_title: str | None = None
     department: str | None = None
+    profile_image: str | None = None
     skills: list[str] = Field(default_factory=list)
     project_ids: list[int] = Field(default_factory=list)
 
@@ -177,6 +180,11 @@ class TeamRead(ORMModel):
 
 class TeamMemberAdd(BaseModel):
     user_id: int
+    project_id: int
+    designation: str = Field(min_length=2, max_length=120)
+
+
+class TeamMemberUpdate(BaseModel):
     project_id: int
     designation: str = Field(min_length=2, max_length=120)
 

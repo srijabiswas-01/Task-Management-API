@@ -610,6 +610,19 @@ def test_team_allocation_controls_member_collaboration_access(
     )
     assert allocation.status_code == 201
     assert allocation.json()["designation"] == "Android Developer"
+    edited_allocation = client.patch(
+        f"/workspaces/{workspace_id}/teams/{team['id']}/members/{allocation.json()['id']}",
+        json={"project_id": hidden_project["id"], "designation": "Android Developer"},
+        headers=auth_headers,
+    )
+    assert edited_allocation.status_code == 200
+    assert edited_allocation.json()["project_id"] == hidden_project["id"]
+    allocation = client.patch(
+        f"/workspaces/{workspace_id}/teams/{team['id']}/members/{allocation.json()['id']}",
+        json={"project_id": visible_project["id"], "designation": "Android Developer"},
+        headers=auth_headers,
+    )
+    assert allocation.status_code == 200
     directory = client.get(
         f"/workspaces/{workspace_id}/user-directory", headers=auth_headers
     )

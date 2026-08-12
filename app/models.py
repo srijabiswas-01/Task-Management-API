@@ -71,6 +71,10 @@ class User(TimestampMixin, Base):
         back_populates="user", cascade="all, delete-orphan", uselist=False
     )
 
+    @property
+    def profile_image(self) -> str | None:
+        return self.profile.profile_image if self.profile else None
+
 
 class UserProfile(TimestampMixin, Base):
     __tablename__ = "user_profiles"
