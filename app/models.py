@@ -67,6 +67,29 @@ class User(TimestampMixin, Base):
     memberships: Mapped[list["WorkspaceMember"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    profile: Mapped["UserProfile | None"] = relationship(
+        back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class UserProfile(TimestampMixin, Base):
+    __tablename__ = "user_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    profile_image: Mapped[str | None] = mapped_column(Text)
+    phone: Mapped[str | None] = mapped_column(String(40))
+    location: Mapped[str | None] = mapped_column(String(150))
+    bio: Mapped[str | None] = mapped_column(Text)
+    professional_title: Mapped[str | None] = mapped_column(String(150))
+    department: Mapped[str | None] = mapped_column(String(150))
+    years_experience: Mapped[int | None] = mapped_column(Integer)
+    skills: Mapped[str | None] = mapped_column(Text)
+    achievements: Mapped[str | None] = mapped_column(Text)
+
+    user: Mapped["User"] = relationship(back_populates="profile")
 
 
 class Workspace(TimestampMixin, Base):
@@ -81,6 +104,12 @@ class Workspace(TimestampMixin, Base):
         back_populates="workspace", cascade="all, delete-orphan"
     )
     teams: Mapped[list["Team"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+    designations: Mapped[list["Designation"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+    departments: Mapped[list["Department"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
     )
     projects: Mapped[list["Project"]] = relationship(
@@ -108,6 +137,46 @@ class WorkspaceMember(TimestampMixin, Base):
     workspace: Mapped["Workspace"] = relationship(back_populates="members")
     user: Mapped["User"] = relationship(back_populates="memberships")
 
+    @property
+    def professional_title(self) -> str | None:
+        return self.user.profile.professional_title if self.user.profile else None
+
+    @property
+    def department(self) -> str | None:
+        return self.user.profile.department if self.user.profile else None
+
+
+class Designation(TimestampMixin, Base):
+    __tablename__ = "designations"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_workspace_designation"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str | None] = mapped_column(Text)
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="designations")
+
+
+class Department(TimestampMixin, Base):
+    __tablename__ = "departments"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_workspace_department"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str | None] = mapped_column(Text)
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="departments")
+
 
 class Team(TimestampMixin, Base):
     __tablename__ = "teams"
@@ -123,6 +192,37 @@ class Team(TimestampMixin, Base):
     members: Mapped[list["TeamMember"]] = relationship(
         back_populates="team", cascade="all, delete-orphan"
     )
+    manager_record: Mapped["TeamManager | None"] = relationship(
+        back_populates="team", cascade="all, delete-orphan", uselist=False
+    )
+
+    @property
+    def manager_user_id(self) -> int | None:
+        return self.manager_record.user_id if self.manager_record else None
+
+    @property
+    def manager_designation(self) -> str | None:
+        return self.manager_record.designation if self.manager_record else None
+
+    @property
+    def manager_user(self) -> "User | None":
+        return self.manager_record.user if self.manager_record else None
+
+
+class TeamManager(TimestampMixin, Base):
+    __tablename__ = "team_managers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    team_id: Mapped[int] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    designation: Mapped[str] = mapped_column(String(120))
+
+    team: Mapped["Team"] = relationship(back_populates="manager_record")
+    user: Mapped["User"] = relationship()
 
 
 class TeamMember(TimestampMixin, Base):
@@ -365,3 +465,32 @@ class ChecklistItem(TimestampMixin, Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
 
     task: Mapped["Task"] = relationship(back_populates="checklist_items")
+    actions: Mapped[list["ChecklistAction"]] = relationship(
+        back_populates="item", cascade="all, delete-orphan", order_by="ChecklistAction.created_at"
+    )
+
+    @property
+    def created_by_id(self) -> int | None:
+        action = next((action for action in self.actions if action.action == "created"), None)
+        return action.user_id if action else None
+
+    @property
+    def last_action_by_id(self) -> int | None:
+        return self.actions[-1].user_id if self.actions else None
+
+    @property
+    def last_action(self) -> str | None:
+        return self.actions[-1].action if self.actions else None
+
+
+class ChecklistAction(TimestampMixin, Base):
+    __tablename__ = "checklist_actions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[int] = mapped_column(
+        ForeignKey("checklist_items.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    action: Mapped[str] = mapped_column(String(30))
+
+    item: Mapped["ChecklistItem"] = relationship(back_populates="actions")

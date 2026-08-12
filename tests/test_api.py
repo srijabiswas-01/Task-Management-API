@@ -32,6 +32,93 @@ def test_register_login_and_me(client: TestClient):
     assert me.json()["email"] == "jane@example.com"
 
 
+def test_auth_normalizes_email_and_rejects_bad_credentials(client: TestClient):
+    registered = client.post(
+        "/auth/register",
+        json={"name": "Jane Doe", "email": "Jane@Example.COM", "password": "securepass123"},
+    )
+    assert registered.status_code == 201
+    assert registered.json()["email"] == "jane@example.com"
+
+    duplicate = client.post(
+        "/auth/register",
+        json={"name": "Other Jane", "email": "JANE@example.com", "password": "securepass123"},
+    )
+    assert duplicate.status_code == 409
+
+    bad_password = client.post(
+        "/auth/login",
+        data={"username": "jane@example.com", "password": "wrong-password"},
+    )
+    assert bad_password.status_code == 401
+
+    logged_in = client.post(
+        "/auth/login",
+        data={"username": "  JANE@EXAMPLE.COM  ", "password": "securepass123"},
+    )
+    assert logged_in.status_code == 200
+
+    invalid_token = client.get(
+        "/auth/me", headers={"Authorization": "Bearer not-a-valid-token"}
+    )
+    assert invalid_token.status_code == 401
+
+
+def test_inactive_user_cannot_login(client: TestClient):
+    from sqlalchemy import select
+
+    from app.database import SessionLocal
+    from app.models import User
+
+    client.post(
+        "/auth/register",
+        json={"name": "Inactive User", "email": "inactive@example.com", "password": "securepass123"},
+    )
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == "inactive@example.com"))
+        user.is_active = False
+        db.commit()
+
+    response = client.post(
+        "/auth/login",
+        data={"username": "inactive@example.com", "password": "securepass123"},
+    )
+    assert response.status_code == 403
+    assert "waiting for administrator approval" in response.json()["detail"]
+
+
+def test_registration_requires_admin_approval(client: TestClient, auth_headers: dict[str, str]):
+    workspace_id = client.post(
+        "/workspaces", json={"name": "Approval workspace"}, headers=auth_headers
+    ).json()["id"]
+    pending = client.post(
+        "/auth/register",
+        json={"name": "Pending User", "email": "pending@example.com", "password": "securepass123"},
+    )
+    assert pending.status_code == 201
+    assert pending.json()["is_active"] is False
+    assert client.post(
+        "/auth/login",
+        data={"username": "pending@example.com", "password": "securepass123"},
+    ).status_code == 403
+
+    directory = client.get(
+        f"/workspaces/{workspace_id}/user-directory", headers=auth_headers
+    ).json()
+    assert next(user for user in directory if user["email"] == "pending@example.com")["is_active"] is False
+
+    approved = client.patch(
+        f"/workspaces/{workspace_id}/users/{pending.json()['id']}/approve",
+        headers=auth_headers,
+    )
+    assert approved.status_code == 200
+    assert approved.json()["is_active"] is True
+    assert client.post(
+        "/auth/login",
+        data={"username": "pending@example.com", "password": "securepass123"},
+    ).status_code == 200
+
+
 def test_core_project_flow(client: TestClient, auth_headers: dict[str, str]):
     workspace = client.post(
         "/workspaces",
@@ -311,6 +398,10 @@ def test_task_collaboration_schedule_checklist_and_status_sync(
         json={"name": "Collaborative Workspace"},
         headers=auth_headers,
     ).json()["id"]
+    client.patch(
+        f"/workspaces/{workspace_id}/users/{teammate['id']}/approve",
+        headers=auth_headers,
+    )
     client.post(
         f"/workspaces/{workspace_id}/members",
         json={"email": "mate@example.com", "role": "member"},
@@ -429,26 +520,38 @@ def test_kanban_rejects_sprints_and_scrum_has_one_active_sprint(
     assert next(s for s in sprints if s["id"] == first["id"])["is_active"] is False
 
 
-def test_team_allocation_limits_member_to_read_only_project_access(
+def test_team_allocation_controls_member_collaboration_access(
     client: TestClient, auth_headers: dict[str, str]
 ):
     teammate = client.post(
         "/auth/register",
         json={"name": "Mobile Developer", "email": "mobile@example.com", "password": "securepass123"},
     ).json()
+    workspace_id = client.post(
+        "/workspaces", json={"name": "Product"}, headers=auth_headers
+    ).json()["id"]
+    client.patch(
+        f"/workspaces/{workspace_id}/users/{teammate['id']}/approve",
+        headers=auth_headers,
+    )
     login = client.post(
         "/auth/login",
         data={"username": "mobile@example.com", "password": "securepass123"},
     ).json()
     member_headers = {"Authorization": f"Bearer {login['access_token']}"}
-    workspace_id = client.post(
-        "/workspaces", json={"name": "Product"}, headers=auth_headers
-    ).json()["id"]
+    available = client.get(
+        f"/workspaces/{workspace_id}/available-users", headers=auth_headers
+    )
+    assert available.status_code == 200
+    assert [user["email"] for user in available.json()] == ["mobile@example.com"]
     workspace_member = client.post(
         f"/workspaces/{workspace_id}/members",
         json={"email": "mobile@example.com", "role": "member"},
         headers=auth_headers,
     ).json()
+    assert client.get(
+        f"/workspaces/{workspace_id}/available-users", headers=auth_headers
+    ).json() == []
     visible_project = client.post(
         f"/workspaces/{workspace_id}/projects",
         json={"name": "Mobile application"},
@@ -459,11 +562,30 @@ def test_team_allocation_limits_member_to_read_only_project_access(
         json={"name": "Internal admin"},
         headers=auth_headers,
     ).json()
+    designation = client.post(
+        f"/workspaces/{workspace_id}/designations",
+        json={"name": "Android Developer", "description": "Builds Android apps"},
+        headers=auth_headers,
+    )
+    assert designation.status_code == 201
+    designation = designation.json()
     team = client.post(
         f"/workspaces/{workspace_id}/teams",
-        json={"name": "Mobile team"},
+        json={
+            "name": "Mobile team",
+            "manager_user_id": teammate["id"],
+            "manager_designation": "Android Developer",
+        },
         headers=auth_headers,
     ).json()
+    assert team["manager_user"]["id"] == teammate["id"]
+    edited_team = client.patch(
+        f"/workspaces/{workspace_id}/teams/{team['id']}",
+        json={"name": "Mobile delivery team", "description": "Mobile releases"},
+        headers=auth_headers,
+    )
+    assert edited_team.status_code == 200
+    assert edited_team.json()["name"] == "Mobile delivery team"
     allocation = client.post(
         f"/workspaces/{workspace_id}/teams/{team['id']}/members",
         json={
@@ -475,20 +597,82 @@ def test_team_allocation_limits_member_to_read_only_project_access(
     )
     assert allocation.status_code == 201
     assert allocation.json()["designation"] == "Android Developer"
+    directory = client.get(
+        f"/workspaces/{workspace_id}/user-directory", headers=auth_headers
+    )
+    assert directory.status_code == 200
+    teammate_directory = next(
+        user for user in directory.json() if user["user_id"] == teammate["id"]
+    )
+    assert teammate_directory["projects"] == ["Mobile application"]
+    assert teammate_directory["membership_id"] == workspace_member["id"]
+    assert client.get(
+        f"/workspaces/{workspace_id}/user-directory", headers=member_headers
+    ).status_code == 403
+    renamed = client.patch(
+        f"/workspaces/{workspace_id}/designations/{designation['id']}",
+        json={"name": "Senior Android Developer"},
+        headers=auth_headers,
+    )
+    assert renamed.status_code == 200
+    allocations = client.get(
+        f"/workspaces/{workspace_id}/team-members", headers=auth_headers
+    ).json()
+    assert allocations[0]["designation"] == "Senior Android Developer"
 
     projects = client.get(
         f"/workspaces/{workspace_id}/projects", headers=member_headers
     ).json()
-    assert [project["id"] for project in projects] == [visible_project["id"]]
+    assert {project["id"] for project in projects} == {
+        visible_project["id"], hidden_project["id"]
+    }
     assert client.get(
         f"/projects/{visible_project['id']}/board", headers=member_headers
     ).status_code == 200
     assert client.get(
         f"/projects/{hidden_project['id']}", headers=member_headers
-    ).status_code == 404
+    ).status_code == 200
     assert client.post(
         f"/projects/{visible_project['id']}/tasks",
         json={"title": "Member cannot create this"},
+        headers=member_headers,
+    ).status_code == 403
+
+    visible_task = client.post(
+        f"/projects/{visible_project['id']}/tasks",
+        json={"title": "Collaborative task"},
+        headers=auth_headers,
+    ).json()
+    checklist_item = client.post(
+        f"/tasks/{visible_task['id']}/checklist",
+        json={"text": "Member can complete this"},
+        headers=auth_headers,
+    ).json()
+    assert checklist_item["created_by_id"] is not None
+    comment = client.post(
+        f"/tasks/{visible_task['id']}/comments",
+        json={"body": "Member progress update"},
+        headers=member_headers,
+    )
+    assert comment.status_code == 201
+    assert comment.json()["author_id"] == teammate["id"]
+    completed = client.patch(
+        f"/tasks/{visible_task['id']}/checklist/{checklist_item['id']}",
+        json={"is_done": True},
+        headers=member_headers,
+    )
+    assert completed.status_code == 200
+    assert completed.json()["last_action_by_id"] == teammate["id"]
+    assert completed.json()["last_action"] == "completed"
+
+    hidden_task = client.post(
+        f"/projects/{hidden_project['id']}/tasks",
+        json={"title": "View-only task"},
+        headers=auth_headers,
+    ).json()
+    assert client.post(
+        f"/tasks/{hidden_task['id']}/comments",
+        json={"body": "Must not be accepted"},
         headers=member_headers,
     ).status_code == 403
 
@@ -496,10 +680,87 @@ def test_team_allocation_limits_member_to_read_only_project_access(
         f"/workspaces/{workspace_id}/teams/{team['id']}/members/{allocation.json()['id']}",
         headers=auth_headers,
     ).status_code == 204
-    assert client.get(
-        f"/workspaces/{workspace_id}/projects", headers=member_headers
-    ).json() == []
     assert client.delete(
-        f"/workspaces/{workspace_id}/members/{workspace_member['id']}",
+        f"/workspaces/{workspace_id}/designations/{designation['id']}",
+        headers=auth_headers,
+    ).status_code == 204
+    assert len(client.get(
+        f"/workspaces/{workspace_id}/projects", headers=member_headers
+    ).json()) == 2
+    assert client.delete(
+        f"/workspaces/{workspace_id}/users/{teammate['id']}",
+        headers=auth_headers,
+    ).status_code == 204
+    assert client.get("/auth/me", headers=member_headers).status_code == 401
+
+
+def test_current_user_profile_and_project_history(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    workspace_id = client.post(
+        "/workspaces", json={"name": "Profile workspace"}, headers=auth_headers
+    ).json()["id"]
+    project = client.post(
+        f"/workspaces/{workspace_id}/projects",
+        json={"name": "Profile project"},
+        headers=auth_headers,
+    ).json()
+    assert project["project_manager_id"] is not None
+    client.post(
+        f"/workspaces/{workspace_id}/designations",
+        json={"name": "Project Lead"},
+        headers=auth_headers,
+    )
+    department = client.post(
+        f"/workspaces/{workspace_id}/departments",
+        json={"name": "Engineering", "description": "Builds the product"},
+        headers=auth_headers,
+    )
+    assert department.status_code == 201
+    department = department.json()
+    current_member = client.get(
+        f"/workspaces/{workspace_id}/members", headers=auth_headers
+    ).json()[0]
+    professional_update = client.patch(
+        f"/workspaces/{workspace_id}/members/{current_member['id']}/professional-profile",
+        json={"professional_title": "Project Lead", "department": "Engineering"},
+        headers=auth_headers,
+    )
+    assert professional_update.status_code == 200
+    assert professional_update.json()["professional_title"] == "Project Lead"
+    assert professional_update.json()["department"] == "Engineering"
+
+    updated = client.put(
+        "/auth/profile",
+        json={
+            "name": "Updated Profile Name",
+            "phone": "+91 99999 99999",
+            "location": "Kolkata, India",
+            "bio": "Product delivery specialist",
+            "professional_title": "Project Lead",
+            "department": "Engineering",
+            "years_experience": 8,
+            "skills": "Planning, Leadership, APIs",
+            "achievements": "Delivered the Orbit platform",
+            "profile_image": "data:image/png;base64,dGVzdA==",
+        },
+        headers=auth_headers,
+    )
+    assert updated.status_code == 200
+    profile = updated.json()
+    assert profile["name"] == "Updated Profile Name"
+    assert profile["project_count"] == 1
+    assert profile["projects"] == ["Profile project"]
+    assert profile["professional_title"] == "Project Lead"
+    assert client.get("/auth/me", headers=auth_headers).json()["name"] == "Updated Profile Name"
+    renamed = client.patch(
+        f"/workspaces/{workspace_id}/departments/{department['id']}",
+        json={"name": "IT"},
+        headers=auth_headers,
+    )
+    assert renamed.status_code == 200
+    assert client.get("/auth/profile", headers=auth_headers).json()["department"] == "IT"
+    assert client.delete(
+        f"/workspaces/{workspace_id}/departments/{department['id']}",
         headers=auth_headers,
     ).status_code == 204

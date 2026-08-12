@@ -2,11 +2,13 @@ from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
-from app.dependencies import CurrentUser, DB, require_project_admin
+from app.dependencies import CurrentUser, DB, require_project_admin, require_project_contributor
 from app.models import (
     BoardColumn,
     ChecklistItem,
+    ChecklistAction,
     Comment,
     Project,
     ProjectBoard,
@@ -239,7 +241,7 @@ def create_comment(
     current_user: CurrentUser,
 ) -> Comment:
     task = accessible_task(db, task_id, current_user.id)
-    require_project_admin(db, task.project_id, current_user.id)
+    require_project_contributor(db, task.project_id, current_user.id)
     comment = Comment(
         task_id=task_id, author_id=current_user.id, body=payload.body.strip()
     )
@@ -274,6 +276,7 @@ def list_checklist(
     return list(
         db.scalars(
             select(ChecklistItem)
+            .options(selectinload(ChecklistItem.actions))
             .where(ChecklistItem.task_id == task_id)
             .order_by(ChecklistItem.position)
         ).all()
@@ -303,6 +306,7 @@ def create_checklist_item(
         text=payload.text.strip(),
         position=position,
     )
+    item.actions.append(ChecklistAction(user_id=current_user.id, action="created"))
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -336,7 +340,11 @@ def update_checklist_item(
     current_user: CurrentUser,
 ) -> ChecklistItem:
     task = accessible_task(db, task_id, current_user.id)
-    require_project_admin(db, task.project_id, current_user.id)
+    values = payload.model_dump(exclude_unset=True)
+    if set(values) == {"is_done"}:
+        require_project_contributor(db, task.project_id, current_user.id)
+    else:
+        require_project_admin(db, task.project_id, current_user.id)
     item = db.scalar(
         select(ChecklistItem).where(
             ChecklistItem.id == item_id,
@@ -345,8 +353,14 @@ def update_checklist_item(
     )
     if item is None:
         raise HTTPException(status_code=404, detail="Checklist item not found")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changed_done = "is_done" in values and values["is_done"] != item.is_done
+    for field, value in values.items():
         setattr(item, field, value.strip() if field == "text" else value)
+    if changed_done:
+        item.actions.append(ChecklistAction(
+            user_id=current_user.id,
+            action="completed" if item.is_done else "reopened",
+        ))
     update_checklist_progress(db, task_id)
     db.commit()
     db.refresh(item)
@@ -394,12 +408,6 @@ def dashboard(
     if membership is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     project_ids_query = select(Project.id).where(Project.workspace_id == workspace_id)
-    if membership.role != WorkspaceRole.admin:
-        project_ids_query = (
-            project_ids_query.join(TeamMember, TeamMember.project_id == Project.id)
-            .where(TeamMember.user_id == current_user.id)
-            .distinct()
-        )
     project_ids = list(db.scalars(project_ids_query).all())
     projects = db.scalar(
         select(func.count(Project.id)).where(Project.id.in_(project_ids))

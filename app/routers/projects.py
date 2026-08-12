@@ -4,6 +4,7 @@ from sqlalchemy import select
 from app.dependencies import (
     CurrentUser,
     DB,
+    require_project_admin,
     require_workspace_admin,
     require_workspace_member,
 )
@@ -20,19 +21,20 @@ from app.schemas import (
 router = APIRouter(tags=["Projects"])
 
 
+def validate_project_manager(db: DB, workspace_id: int, user_id: int) -> None:
+    manager = db.scalar(select(WorkspaceMember).where(
+        WorkspaceMember.workspace_id == workspace_id,
+        WorkspaceMember.user_id == user_id,
+        WorkspaceMember.role == WorkspaceRole.admin,
+    ))
+    if manager is None:
+        raise HTTPException(status_code=400, detail="Project manager must be a workspace admin")
+
+
 def accessible_project(db: DB, project_id: int, user_id: int) -> Project:
     project = db.get(Project, project_id)
     if project is not None:
-        membership = require_workspace_member(db, project.workspace_id, user_id)
-        if membership.role != WorkspaceRole.admin:
-            allocated = db.scalar(
-                select(TeamMember.id).where(
-                    TeamMember.project_id == project_id,
-                    TeamMember.user_id == user_id,
-                )
-            )
-            if allocated is None:
-                project = None
+        require_workspace_member(db, project.workspace_id, user_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
@@ -62,7 +64,10 @@ def create_project(
     current_user: CurrentUser,
 ) -> Project:
     require_workspace_admin(db, workspace_id, current_user.id)
-    project = Project(workspace_id=workspace_id, **payload.model_dump())
+    values = payload.model_dump()
+    values["project_manager_id"] = values.get("project_manager_id") or current_user.id
+    validate_project_manager(db, workspace_id, values["project_manager_id"])
+    project = Project(workspace_id=workspace_id, **values)
     db.add(project)
     db.commit()
     db.refresh(project)
@@ -75,12 +80,8 @@ def create_project(
 def list_projects(
     workspace_id: int, db: DB, current_user: CurrentUser
 ) -> list[Project]:
-    membership = require_workspace_member(db, workspace_id, current_user.id)
+    require_workspace_member(db, workspace_id, current_user.id)
     query = select(Project).where(Project.workspace_id == workspace_id)
-    if membership.role != WorkspaceRole.admin:
-        query = query.join(
-            TeamMember, TeamMember.project_id == Project.id
-        ).where(TeamMember.user_id == current_user.id).distinct()
     return list(db.scalars(query.order_by(Project.created_at.desc())).all())
 
 
@@ -97,8 +98,13 @@ def update_project(
     current_user: CurrentUser,
 ) -> Project:
     project = accessible_project(db, project_id, current_user.id)
-    require_workspace_admin(db, project.workspace_id, current_user.id)
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    require_project_admin(db, project.id, current_user.id)
+    values = payload.model_dump(exclude_unset=True)
+    if "project_manager_id" in values:
+        if values["project_manager_id"] is None:
+            raise HTTPException(status_code=400, detail="Every project requires a project admin")
+        validate_project_manager(db, project.workspace_id, values["project_manager_id"])
+    for field, value in values.items():
         setattr(project, field, value)
     db.commit()
     db.refresh(project)
@@ -112,7 +118,7 @@ def delete_project(
     current_user: CurrentUser,
 ) -> None:
     project = accessible_project(db, project_id, current_user.id)
-    require_workspace_admin(db, project.workspace_id, current_user.id)
+    require_project_admin(db, project.id, current_user.id)
     db.delete(project)
     db.commit()
 
@@ -129,7 +135,7 @@ def create_sprint(
     current_user: CurrentUser,
 ) -> Sprint:
     project = accessible_project(db, project_id, current_user.id)
-    require_workspace_admin(db, project.workspace_id, current_user.id)
+    require_project_admin(db, project.id, current_user.id)
     require_scrum_board(db, project)
     if payload.is_active:
         for current in db.scalars(
@@ -172,7 +178,7 @@ def update_sprint(
     if sprint is None:
         raise HTTPException(status_code=404, detail="Sprint not found")
     project = accessible_project(db, sprint.project_id, current_user.id)
-    require_workspace_admin(db, project.workspace_id, current_user.id)
+    require_project_admin(db, project.id, current_user.id)
     require_scrum_board(db, project)
     values = payload.model_dump(exclude_unset=True)
     if values.get("is_active"):

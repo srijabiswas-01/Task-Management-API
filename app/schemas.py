@@ -23,6 +23,25 @@ class UserRead(ORMModel):
     created_at: datetime
 
 
+class UserProfileUpdate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    profile_image: str | None = Field(default=None, max_length=3_000_000)
+    phone: str | None = Field(default=None, max_length=40)
+    location: str | None = Field(default=None, max_length=150)
+    bio: str | None = Field(default=None, max_length=3000)
+    professional_title: str | None = Field(default=None, max_length=150)
+    department: str | None = Field(default=None, max_length=150)
+    years_experience: int | None = Field(default=None, ge=0, le=80)
+    skills: str | None = Field(default=None, max_length=3000)
+    achievements: str | None = Field(default=None, max_length=5000)
+
+
+class UserProfileRead(UserProfileUpdate):
+    email: EmailStr
+    project_count: int = 0
+    projects: list[str] = Field(default_factory=list)
+
+
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -57,11 +76,75 @@ class MemberRead(ORMModel):
     user_id: int
     role: WorkspaceRole
     user: UserRead
+    professional_title: str | None = None
+    department: str | None = None
+
+
+class MemberProfessionalUpdate(BaseModel):
+    professional_title: str | None = Field(default=None, max_length=150)
+    department: str | None = Field(default=None, max_length=150)
+
+
+class UserDirectoryRead(BaseModel):
+    user_id: int
+    name: str
+    email: EmailStr
+    is_active: bool
+    membership_id: int | None = None
+    role: WorkspaceRole | None = None
+    professional_title: str | None = None
+    department: str | None = None
+    projects: list[str] = Field(default_factory=list)
+
+
+class DesignationCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class DesignationUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class DesignationRead(ORMModel):
+    id: int
+    workspace_id: int
+    name: str
+    description: str | None
+    created_at: datetime
+
+
+class DepartmentCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class DepartmentUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class DepartmentRead(ORMModel):
+    id: int
+    workspace_id: int
+    name: str
+    description: str | None
+    created_at: datetime
 
 
 class TeamCreate(BaseModel):
     name: str = Field(min_length=2, max_length=150)
     description: str | None = None
+    manager_user_id: int
+    manager_designation: str = Field(min_length=2, max_length=120)
+
+
+class TeamUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=150)
+    description: str | None = None
+    manager_user_id: int | None = None
+    manager_designation: str | None = Field(default=None, min_length=2, max_length=120)
 
 
 class TeamRead(ORMModel):
@@ -69,6 +152,9 @@ class TeamRead(ORMModel):
     workspace_id: int
     name: str
     description: str | None
+    manager_user_id: int | None = None
+    manager_designation: str | None = None
+    manager_user: UserRead | None = None
     created_at: datetime
 
 
@@ -281,6 +367,9 @@ class ChecklistItemRead(ORMModel):
     text: str
     is_done: bool
     position: int
+    created_by_id: int | None = None
+    last_action_by_id: int | None = None
+    last_action: str | None = None
     created_at: datetime
 
 

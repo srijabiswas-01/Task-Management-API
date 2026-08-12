@@ -70,7 +70,27 @@ def require_project_admin(
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    return require_workspace_admin(db, project.workspace_id, user_id)
+    membership = require_workspace_member(db, project.workspace_id, user_id)
+    if membership.role != WorkspaceRole.admin and project.project_manager_id != user_id:
+        raise HTTPException(status_code=403, detail="Project manager required")
+    return membership
+
+
+def require_project_contributor(db: Session, project_id: int, user_id: int) -> WorkspaceMember:
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    membership = require_workspace_member(db, project.workspace_id, user_id)
+    if membership.role == WorkspaceRole.admin or project.project_manager_id == user_id:
+        return membership
+    allocated = db.scalar(
+        select(TeamMember.id).where(
+            TeamMember.project_id == project_id, TeamMember.user_id == user_id
+        )
+    )
+    if allocated is None:
+        raise HTTPException(status_code=403, detail="Project allocation required")
+    return membership
 
 
 def require_team_admin(db: Session, team_id: int, user_id: int) -> Team:
