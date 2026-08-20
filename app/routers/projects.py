@@ -8,7 +8,7 @@ from app.dependencies import (
     require_workspace_admin,
     require_workspace_member,
 )
-from app.models import Project, ProjectBoard, Sprint, TeamMember, WorkspaceMember, WorkspaceRole
+from app.models import Project, ProjectBoard, Sprint, Task, TeamMember, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     ProjectCreate,
     ProjectRead,
@@ -66,6 +66,7 @@ def create_project(
 ) -> Project:
     require_workspace_admin(db, workspace_id, current_user.id)
     values = payload.model_dump()
+    values["deadline"] = values["end_date"]
     values["project_manager_id"] = values.get("project_manager_id") or current_user.id
     validate_project_manager(db, workspace_id, values["project_manager_id"])
     project = Project(workspace_id=workspace_id, **values)
@@ -101,6 +102,28 @@ def update_project(
     project = accessible_project(db, project_id, current_user.id)
     require_project_admin(db, project.id, current_user.id)
     values = payload.model_dump(exclude_unset=True)
+    next_start = values.get("start_date", project.start_date)
+    next_end = values.get("end_date", project.end_date)
+    if next_start is None or next_end is None:
+        raise HTTPException(status_code=400, detail="Project start and end dates are required")
+    if next_end < next_start:
+        raise HTTPException(status_code=400, detail="Project end date must be on or after its start date")
+    dated_tasks = db.scalars(select(Task).where(Task.project_id == project.id)).all()
+    dated_sprints = db.scalars(select(Sprint).where(Sprint.project_id == project.id)).all()
+    if any(
+        (task.start_date and task.start_date < next_start) or
+        (task.due_date and task.due_date > next_end) or
+        (task.start_at and task.start_at.date() < next_start) or
+        (task.end_at and task.end_at.date() > next_end)
+        for task in dated_tasks
+    ) or any(
+        (sprint.start_date and sprint.start_date < next_start) or
+        (sprint.end_date and sprint.end_date > next_end)
+        for sprint in dated_sprints
+    ):
+        raise HTTPException(status_code=409, detail="Project dates must include all existing task and sprint dates")
+    if "end_date" in values:
+        values["deadline"] = values["end_date"]
     if "project_manager_id" in values:
         if values["project_manager_id"] is None:
             raise HTTPException(status_code=400, detail="Every project requires a project admin")
@@ -138,6 +161,9 @@ def create_sprint(
     project = accessible_project(db, project_id, current_user.id)
     require_project_admin(db, project.id, current_user.id)
     require_scrum_board(db, project)
+    if ((payload.start_date and payload.start_date < project.start_date) or
+        (payload.end_date and payload.end_date > project.end_date)):
+        raise HTTPException(status_code=400, detail="Sprint dates must be within the project dates")
     if payload.is_active:
         for current in db.scalars(
             select(Sprint).where(
@@ -182,6 +208,11 @@ def update_sprint(
     require_project_admin(db, project.id, current_user.id)
     require_scrum_board(db, project)
     values = payload.model_dump(exclude_unset=True)
+    next_start = values.get("start_date", sprint.start_date)
+    next_end = values.get("end_date", sprint.end_date)
+    if ((next_start and next_start < project.start_date) or
+        (next_end and next_end > project.end_date)):
+        raise HTTPException(status_code=400, detail="Sprint dates must be within the project dates")
     if values.get("is_active"):
         for current in db.scalars(
             select(Sprint).where(

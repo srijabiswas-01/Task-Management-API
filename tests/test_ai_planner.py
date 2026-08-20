@@ -12,7 +12,7 @@ def test_ai_plan_preview_and_confirmation_create_board_tasks(
     ).json()["id"]
     project_id = client.post(
         f"/workspaces/{workspace_id}/projects",
-        json={"name": "Mobile Application"},
+        json={"name": "Mobile Application", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     ).json()["id"]
     board = client.get(
@@ -28,12 +28,18 @@ def test_ai_plan_preview_and_confirmation_create_board_tasks(
                 description="Create the core screens and navigation.",
                 priority="high",
                 story_points=5,
+                start_date="2026-08-01",
+                end_date="2026-09-30",
+                checklist=["Approve interface review"],
             ),
             AIGeneratedTask(
                 title="Implement authentication",
                 description="Add secure registration and login.",
                 priority="critical",
                 story_points=8,
+                start_date="2026-10-01",
+                end_date="2026-12-31",
+                checklist=["Verify login", "Verify registration"],
             ),
         ],
     )
@@ -54,6 +60,8 @@ def test_ai_plan_preview_and_confirmation_create_board_tasks(
     assert preview.status_code == 200
     assert preview.json()["provider"] == "groq"
     assert preview.json()["fallback_used"] is True
+    assert preview.json()["tasks"][0]["start_date"] == "2026-08-01"
+    assert preview.json()["tasks"][1]["end_date"] == "2026-12-31"
 
     confirmed = client.post(
         f"/projects/{project_id}/ai/task-plan/confirm",
@@ -63,6 +71,12 @@ def test_ai_plan_preview_and_confirmation_create_board_tasks(
     assert confirmed.status_code == 201
     assert len(confirmed.json()) == 2
     assert {task["status"] for task in confirmed.json()} == {"backlog"}
+    assert confirmed.json()[0]["start_date"] == "2026-08-01"
+    assert confirmed.json()[1]["due_date"] == "2026-12-31"
+    checklist = client.get(
+        f"/tasks/{confirmed.json()[0]['id']}/checklist", headers=auth_headers
+    )
+    assert [item["text"] for item in checklist.json()] == ["Approve interface review"]
 
     updated_board = client.get(
         f"/projects/{project_id}/board",

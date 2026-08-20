@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.dependencies import CurrentUser, DB, require_project_admin
@@ -88,16 +88,13 @@ def sync_task_positions(db: Session, project: Project, board: ProjectBoard) -> N
             .where(BoardColumn.board_id == board.id)
         ).all()
     )
-    column_counts = {
-        column.id: len(
-            db.scalars(
-                select(TaskBoardPosition).where(
-                    TaskBoardPosition.column_id == column.id
-                )
-            ).all()
-        )
-        for column in columns
-    }
+    column_counts = {column.id: 0 for column in columns}
+    for column_id, count in db.execute(
+        select(TaskBoardPosition.column_id, func.count(TaskBoardPosition.task_id))
+        .where(TaskBoardPosition.column_id.in_(column_counts))
+        .group_by(TaskBoardPosition.column_id)
+    ):
+        column_counts[column_id] = count
     for task in db.scalars(select(Task).where(Task.project_id == project.id)).all():
         if task.id in existing_task_ids:
             continue

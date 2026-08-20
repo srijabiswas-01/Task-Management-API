@@ -30,6 +30,19 @@ async def lifespan(_: FastAPI):
             connection.execute(text(
                 f"ALTER TABLE workspace_members ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT {default}"
             ))
+    project_columns = {column["name"] for column in inspect(engine).get_columns("projects")}
+    with engine.begin() as connection:
+        if "start_date" not in project_columns:
+            connection.execute(text("ALTER TABLE projects ADD COLUMN start_date DATE"))
+        if "end_date" not in project_columns:
+            connection.execute(text("ALTER TABLE projects ADD COLUMN end_date DATE"))
+        created_date = "date(created_at)" if engine.dialect.name == "sqlite" else "CAST(created_at AS DATE)"
+        connection.execute(text(f"UPDATE projects SET start_date = {created_date} WHERE start_date IS NULL"))
+        connection.execute(text(
+            "UPDATE projects SET end_date = CASE "
+            "WHEN deadline IS NOT NULL AND deadline >= start_date THEN deadline "
+            "ELSE start_date END WHERE end_date IS NULL"
+        ))
     yield
 
 

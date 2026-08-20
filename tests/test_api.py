@@ -143,10 +143,12 @@ def test_core_project_flow(client: TestClient, auth_headers: dict[str, str]):
 
     project = client.post(
         f"/workspaces/{workspace_id}/projects",
-        json={"name": "Platform", "status": "active", "priority": "high"},
+        json={"name": "Platform", "status": "active", "priority": "high", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     )
     assert project.status_code == 201
+    assert project.json()["start_date"] == "2026-08-01"
+    assert project.json()["end_date"] == "2026-12-31"
     project_id = project.json()["id"]
     client.put(
         f"/projects/{project_id}/board",
@@ -188,6 +190,82 @@ def test_core_project_flow(client: TestClient, auth_headers: dict[str, str]):
     assert dashboard.json()["completion_percent"] == 100
 
 
+def test_projects_require_valid_dates_and_are_scoped_to_workspace(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    first = client.post("/workspaces", json={"name": "First workspace"}, headers=auth_headers).json()
+    second = client.post("/workspaces", json={"name": "Second workspace"}, headers=auth_headers).json()
+    missing_dates = client.post(
+        f"/workspaces/{first['id']}/projects",
+        json={"name": "Missing dates"}, headers=auth_headers,
+    )
+    assert missing_dates.status_code == 422
+    reversed_dates = client.post(
+        f"/workspaces/{first['id']}/projects",
+        json={"name": "Bad dates", "start_date": "2026-09-01", "end_date": "2026-08-01"},
+        headers=auth_headers,
+    )
+    assert reversed_dates.status_code == 422
+    created = client.post(
+        f"/workspaces/{first['id']}/projects",
+        json={"name": "First only", "start_date": "2026-08-01", "end_date": "2026-12-31"},
+        headers=auth_headers,
+    )
+    assert created.status_code == 201
+    assert [item["name"] for item in client.get(
+        f"/workspaces/{first['id']}/projects", headers=auth_headers
+    ).json()] == ["First only"]
+    assert client.get(
+        f"/workspaces/{second['id']}/projects", headers=auth_headers
+    ).json() == []
+
+
+def test_task_completion_moves_card_to_done_and_can_reopen(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    workspace_id = client.post(
+        "/workspaces", json={"name": "Completion workspace"}, headers=auth_headers
+    ).json()["id"]
+    project_id = client.post(
+        f"/workspaces/{workspace_id}/projects",
+        json={
+            "name": "Completion project",
+            "start_date": "2026-08-01",
+            "end_date": "2026-12-31",
+        },
+        headers=auth_headers,
+    ).json()["id"]
+    task_id = client.post(
+        f"/projects/{project_id}/tasks",
+        json={"title": "Complete this card"},
+        headers=auth_headers,
+    ).json()["id"]
+
+    completed = client.patch(
+        f"/tasks/{task_id}/completion",
+        json={"is_completed": True},
+        headers=auth_headers,
+    )
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "done"
+    assert completed.json()["progress"] == 100
+    board = client.get(f"/projects/{project_id}/board", headers=auth_headers).json()
+    done_column = next(column for column in board["columns"] if column["system_status"] == "done")
+    assert board["task_positions"][str(task_id)]["column_id"] == done_column["id"]
+
+    reopened = client.patch(
+        f"/tasks/{task_id}/completion",
+        json={"is_completed": False},
+        headers=auth_headers,
+    )
+    assert reopened.status_code == 200
+    assert reopened.json()["status"] == "backlog"
+    assert reopened.json()["progress"] == 0
+    board = client.get(f"/projects/{project_id}/board", headers=auth_headers).json()
+    first_column = min(board["columns"], key=lambda column: column["position"])
+    assert board["task_positions"][str(task_id)]["column_id"] == first_column["id"]
+
+
 def test_editing_task_details_preserves_its_board_position(
     client: TestClient, auth_headers: dict[str, str]
 ):
@@ -198,7 +276,7 @@ def test_editing_task_details_preserves_its_board_position(
     ).json()["id"]
     project_id = client.post(
         f"/workspaces/{workspace_id}/projects",
-        json={"name": "Stable board project"},
+        json={"name": "Stable board project", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     ).json()["id"]
     task_ids = [
@@ -237,7 +315,7 @@ def test_custom_board_and_drag_positions(
     ).json()["id"]
     project_id = client.post(
         f"/workspaces/{workspace_id}/projects",
-        json={"name": "Scrum Product"},
+        json={"name": "Scrum Product", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     ).json()["id"]
 
@@ -320,7 +398,7 @@ def test_workspace_owner_can_delete_workspace_and_all_children(
     ).json()["id"]
     project_id = client.post(
         f"/workspaces/{workspace_id}/projects",
-        json={"name": "Temporary Project"},
+        json={"name": "Temporary Project", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     ).json()["id"]
     task_id = client.post(
@@ -372,7 +450,7 @@ def test_workspace_admin_can_delete_project_and_all_children(
     ).json()["id"]
     project_id = client.post(
         f"/workspaces/{workspace_id}/projects",
-        json={"name": "Disposable project"},
+        json={"name": "Disposable project", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     ).json()["id"]
     task_id = client.post(
@@ -423,7 +501,7 @@ def test_task_collaboration_schedule_checklist_and_status_sync(
     me_id = client.get("/auth/me", headers=auth_headers).json()["id"]
     project_id = client.post(
         f"/workspaces/{workspace_id}/projects",
-        json={"name": "Collaborative Project"},
+        json={"name": "Collaborative Project", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     ).json()["id"]
     board = client.get(
@@ -500,7 +578,7 @@ def test_kanban_rejects_sprints_and_scrum_has_one_active_sprint(
     ).json()["id"]
     project_id = client.post(
         f"/workspaces/{workspace_id}/projects",
-        json={"name": "Framework Project"},
+        json={"name": "Framework Project", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     ).json()["id"]
     client.get(f"/projects/{project_id}/board", headers=auth_headers)
@@ -567,12 +645,12 @@ def test_team_allocation_controls_member_collaboration_access(
     ).json() == []
     visible_project = client.post(
         f"/workspaces/{workspace_id}/projects",
-        json={"name": "Mobile application"},
+        json={"name": "Mobile application", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     ).json()
     hidden_project = client.post(
         f"/workspaces/{workspace_id}/projects",
-        json={"name": "Internal admin"},
+        json={"name": "Internal admin", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     ).json()
     designation = client.post(
@@ -779,7 +857,7 @@ def test_current_user_profile_and_project_history(
     assert skill_members.json()[0]["skills"] == ["Python", "SQL", "FastAPI", "Docker"]
     project = client.post(
         f"/workspaces/{workspace_id}/projects",
-        json={"name": "Profile project"},
+        json={"name": "Profile project", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     ).json()
     assert project["project_manager_id"] is not None

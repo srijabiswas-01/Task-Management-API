@@ -272,6 +272,8 @@ class Project(TimestampMixin, Base):
     )
     budget: Mapped[int | None] = mapped_column(Integer)
     deadline: Mapped[date | None] = mapped_column(Date)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
     project_manager_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
 
     workspace: Mapped["Workspace"] = relationship(back_populates="projects")

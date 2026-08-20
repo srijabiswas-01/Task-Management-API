@@ -31,6 +31,7 @@ from app.schemas import (
     CommentRead,
     DashboardSummary,
     TaskCreate,
+    TaskCompletionUpdate,
     TaskRead,
     TaskUpdate,
 )
@@ -78,6 +79,14 @@ def set_task_schedule(task: Task, start_at, end_at) -> None:
     task.schedule.end_at = end_at
 
 
+def validate_task_project_dates(project: Project, start_date, due_date, start_at, end_at) -> None:
+    if ((start_date and start_date < project.start_date) or
+        (due_date and due_date > project.end_date) or
+        (start_at and start_at.date() < project.start_date) or
+        (end_at and end_at.date() > project.end_date)):
+        raise HTTPException(status_code=400, detail="Task dates must be within the project dates")
+
+
 def sync_board_column_to_status(db: DB, task: Task) -> None:
     board = db.scalar(
         select(ProjectBoard).where(ProjectBoard.project_id == task.project_id)
@@ -91,7 +100,15 @@ def sync_board_column_to_status(db: DB, task: Task) -> None:
         )
     )
     if column is None:
-        return
+        if task.status != TaskStatus.done:
+            return
+        column = db.scalar(
+            select(BoardColumn)
+            .where(BoardColumn.board_id == board.id)
+            .order_by(BoardColumn.position.desc())
+        )
+        if column is None:
+            return
     item = db.scalar(
         select(TaskBoardPosition).where(TaskBoardPosition.task_id == task.id)
     )
@@ -113,6 +130,31 @@ def sync_board_column_to_status(db: DB, task: Task) -> None:
                 position=next_position,
             )
         )
+    else:
+        item.column_id = column.id
+        item.position = next_position
+
+
+def move_task_to_board_edge(db: DB, task: Task, completed: bool) -> None:
+    board = db.scalar(select(ProjectBoard).where(ProjectBoard.project_id == task.project_id))
+    if board is None:
+        sync_board_column_to_status(db, task)
+        return
+    order = BoardColumn.position.desc() if completed else BoardColumn.position.asc()
+    column = db.scalar(
+        select(BoardColumn).where(BoardColumn.board_id == board.id).order_by(order)
+    )
+    if column is None:
+        return
+    item = db.scalar(select(TaskBoardPosition).where(TaskBoardPosition.task_id == task.id))
+    next_position = db.scalar(
+        select(func.count(TaskBoardPosition.task_id)).where(
+            TaskBoardPosition.column_id == column.id,
+            TaskBoardPosition.task_id != task.id,
+        )
+    ) or 0
+    if item is None:
+        db.add(TaskBoardPosition(task_id=task.id, column_id=column.id, position=next_position))
     else:
         item.column_id = column.id
         item.position = next_position
@@ -149,6 +191,7 @@ def create_task(
     legacy_assignee = values.pop("assignee_id")
     start_at = values.pop("start_at")
     end_at = values.pop("end_at")
+    validate_task_project_dates(project, values.get("start_date"), values.get("due_date"), start_at, end_at)
     if not assignee_ids and legacy_assignee is not None:
         assignee_ids = [legacy_assignee]
     task = Task(
@@ -206,6 +249,13 @@ def update_task(
     has_schedule = "start_at" in values or "end_at" in values
     start_at = values.pop("start_at", task.start_at)
     end_at = values.pop("end_at", task.end_at)
+    validate_task_project_dates(
+        project,
+        values.get("start_date", task.start_date),
+        values.get("due_date", task.due_date),
+        start_at,
+        end_at,
+    )
     if assignee_ids is not None:
         set_task_assignees(db, task, project, assignee_ids)
     elif legacy_assignee is not None:
@@ -218,6 +268,23 @@ def update_task(
         setattr(task, field, value)
     if "status" in values:
         sync_board_column_to_status(db, task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+@router.patch("/tasks/{task_id}/completion", response_model=TaskRead)
+def update_task_completion(
+    task_id: int,
+    payload: TaskCompletionUpdate,
+    db: DB,
+    current_user: CurrentUser,
+) -> Task:
+    task = accessible_task(db, task_id, current_user.id)
+    require_project_contributor(db, task.project_id, current_user.id)
+    task.status = TaskStatus.done if payload.is_completed else TaskStatus.backlog
+    task.progress = 100 if payload.is_completed else 0
+    move_task_to_board_edge(db, task, payload.is_completed)
     db.commit()
     db.refresh(task)
     return task

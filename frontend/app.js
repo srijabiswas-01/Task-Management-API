@@ -3,7 +3,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = {
   token: localStorage.getItem("orbit_token"), profile: null,
   user: null, workspaces: [], workspace: null, projects: [], project: null,
-  tasks: [], sprints: [], members: [], teams: [], teamMembers: [], designations: [], departments: [], userDirectory: [], skillCatalog: [], skillMembers: [], dashboard: null, board: null, view: "dashboard"
+  tasks: [], sprints: [], members: [], teams: [], teamMembers: [], designations: [], departments: [], userDirectory: [], skillCatalog: [], skillMembers: [], dashboard: null, board: null, projectLoading: false, view: "dashboard"
 };
 const VIEW_PATHS = {
   dashboard: "/app/overview",
@@ -222,8 +222,8 @@ async function boot() {
       history.replaceState({view:state.view}, "", VIEW_PATHS[state.view]);
     }
     updateWorkspaceUI();
-    if (!state.workspace) { renderNoWorkspace(); } else { await loadWorkspace(); }
     $("#boot-screen").classList.add("hidden");
+    if (!state.workspace) { renderNoWorkspace(); } else { await loadWorkspace(); }
   } catch (err) {
     // Authentication already succeeded. Keep the signed-in shell visible and
     // report application-data failures without redirecting to the login page.
@@ -240,7 +240,10 @@ function updateWorkspaceUI() {
     (state.workspace ? `<button class="workspace-settings" data-workspace-settings="true">⚙ Workspace settings</button>` : "") +
     `<button class="new-workspace" data-new="true">＋ Create workspace</button>`;
   $$("[data-id]", $("#workspace-menu")).forEach(btn => btn.onclick = async () => {
-    state.workspace = state.workspaces.find(w => w.id === Number(btn.dataset.id)); localStorage.setItem("orbit_workspace", state.workspace.id);
+    const nextWorkspace=state.workspaces.find(w=>w.id===Number(btn.dataset.id));
+    if(!nextWorkspace||nextWorkspace.id===state.workspace?.id){$("#workspace-menu").classList.add("hidden");return}
+    state.workspace=nextWorkspace;state.project=null;state.projects=[];state.tasks=[];state.sprints=[];state.board=null;state.dashboard=null;state.members=[];state.teams=[];state.teamMembers=[];
+    localStorage.setItem("orbit_workspace",state.workspace.id);
     $("#workspace-menu").classList.add("hidden"); updateWorkspaceUI(); await loadWorkspace();
   });
   $("[data-workspace-settings]", $("#workspace-menu"))?.addEventListener("click", workspaceSettingsModal);
@@ -259,28 +262,41 @@ async function loadWorkspace() {
   try {
     const workspace = activeWorkspace();
     if (!workspace) { renderNoWorkspace(); return; }
-    [state.projects, state.dashboard, state.members, state.teams, state.teamMembers, state.designations, state.departments] = await Promise.all([
-      api(`/workspaces/${workspace.id}/projects`), api(`/workspaces/${workspace.id}/dashboard`),
-      api(`/workspaces/${workspace.id}/members`), api(`/workspaces/${workspace.id}/teams`),
-      api(`/workspaces/${workspace.id}/team-members`), api(`/workspaces/${workspace.id}/designations`),
-      api(`/workspaces/${workspace.id}/departments`)
+    const workspaceId=workspace.id;
+    [state.projects,state.dashboard,state.members]=await Promise.all([
+      api(`/workspaces/${workspaceId}/projects`),api(`/workspaces/${workspaceId}/dashboard`),api(`/workspaces/${workspaceId}/members`)
     ]);
-    if (state.project && !state.projects.some(p => p.id === state.project.id)) state.project = null;
-    state.userDirectory=isAdmin()?await api(`/workspaces/${workspace.id}/user-directory`):[];
-    state.skillCatalog=await api(`/workspaces/${workspace.id}/skill-catalog`);
-    state.skillMembers=isAdmin()?await api(`/workspaces/${workspace.id}/skill-members`):[];
+    if(state.workspace?.id!==workspaceId)return;
     const savedProjectId=Number(localStorage.getItem(`orbit_project_${workspace.id}`));
-    state.project ||= state.projects.find(project=>project.id===savedProjectId)||state.projects[0]||null;
-    await loadProject(); render();
+    state.project=state.projects.find(project=>project.id===savedProjectId)||state.projects[0]||null;
+    render();
+    const needsProject=["board","gantt","sprints"].includes(state.view);
+    const [secondary]=await Promise.all([
+      Promise.all([
+        api(`/workspaces/${workspaceId}/teams`),api(`/workspaces/${workspaceId}/team-members`),
+        api(`/workspaces/${workspaceId}/designations`),api(`/workspaces/${workspaceId}/departments`),
+        api(`/workspaces/${workspaceId}/skill-catalog`),
+        isAdmin()?api(`/workspaces/${workspaceId}/user-directory`):Promise.resolve([]),
+        isAdmin()?api(`/workspaces/${workspaceId}/skill-members`):Promise.resolve([])
+      ]),
+      needsProject?loadProject():Promise.resolve()
+    ]);
+    if(state.workspace?.id!==workspaceId)return;
+    [state.teams,state.teamMembers,state.designations,state.departments,state.skillCatalog,state.userDirectory,state.skillMembers]=secondary;
+    render();
   } catch (err) { toast(err.message, true); }
 }
 async function loadProject() {
-  if (!state.project) { state.tasks=[]; state.sprints=[]; state.board=null; return; }
-  state.board = await api(`/projects/${state.project.id}/board`);
-  [state.tasks, state.sprints] = await Promise.all([
-    api(`/projects/${state.project.id}/tasks`),
-    state.board.framework === "scrum" ? api(`/projects/${state.project.id}/sprints`) : Promise.resolve([])
-  ]);
+  if (!state.project) { state.tasks=[]; state.sprints=[]; state.board=null; state.projectLoading=false; return; }
+  const projectId=state.project.id;
+  state.projectLoading=true;state.board=null;state.tasks=[];state.sprints=[];
+  if(["board","gantt","sprints"].includes(state.view))render();
+  const [board,tasks]=await Promise.all([api(`/projects/${projectId}/board`),api(`/projects/${projectId}/tasks`)]);
+  if(state.project?.id!==projectId)return;
+  state.board=board;state.tasks=tasks;
+  state.sprints=board.framework==="scrum"?await api(`/projects/${projectId}/sprints`):[];
+  if(state.project?.id!==projectId)return;
+  state.projectLoading=false;
   if (state.view === "sprints" && state.board.framework !== "scrum") {
     state.view = "board";
     history.replaceState({view:"board"}, "", VIEW_PATHS.board);
@@ -293,6 +309,9 @@ $("#mobile-menu").onclick = () => $(".sidebar").classList.toggle("open");
 $("#main-nav").onclick = async e => {
   const btn = e.target.closest("[data-view]"); if (!btn) return;
   navigate(btn.dataset.view);
+  if(["board","gantt","sprints"].includes(btn.dataset.view)&&state.project&&!state.board){
+    try{await loadProject();render()}catch(err){state.projectLoading=false;toast(err.message,true)}
+  }
 };
 function navigate(view, replace = false) {
   state.view = view;
@@ -367,6 +386,7 @@ function projectSelector() {
 }
 function boardView() {
   if (!state.project) return `${pageHeading("Task board","Visualize work as it moves through your workflow.",`<button id="new-project" class="btn primary">＋ New project</button>`)}${emptyMini("Create a project first","Tasks live inside projects.")}`;
+  if(state.projectLoading)return `${pageHeading("Task board",`Loading ${esc(state.project.name)}…`)}<div class="board-loading"><i></i><strong>Loading board and tasks…</strong><span>The board will be ready in a moment.</span></div>`;
   const columns = state.board?.columns || [];
   return `${pageHeading("Task board",`Drag tasks and lists to organize ${esc(state.project.name)}.`,`<div class="board-actions"><button id="export-board-pdf" class="btn">Download PDF</button><button id="ai-plan-tasks" class="btn ai-btn">AI plan</button><button id="customize-board" class="btn">⚙ Customize</button><button id="new-task-view" class="btn primary">＋ Add task</button></div>`)}
     <div class="toolbar">${projectSelector()}${state.board?.framework==="scrum"?`<select id="sprint-filter"><option value="">All Scrum work</option><option value="backlog">Product backlog</option>${state.sprints.map(s=>`<option value="${s.id}">${s.is_active?"● ":""}${esc(s.name)}</option>`).join("")}</select>`:""}<span class="framework-pill">${pretty(state.board?.framework||"kanban")} board</span></div>
@@ -381,7 +401,8 @@ function kanbanColumn(column,tasks){return `<section class="kanban-col" draggabl
 function taskCard(t){
   const assignees=(t.assignee_ids||[]).map(id=>state.members.find(m=>m.user_id===id)?.user).filter(Boolean);
   const checklist=t.checklist_total?`<span class="check-count ${t.checklist_done===t.checklist_total?"complete":""}">☑ ${t.checklist_done}/${t.checklist_total}</span>`:"";
-  return `<article class="task-card" draggable="${canManageProject()}" data-task="${t.id}"><span class="priority-dot ${t.priority}">${t.priority}</span><h4>${esc(t.title)}</h4><p>${esc(t.description||"No description")}</p>
+  const completed=t.status==="done";
+  return `<article class="task-card ${completed?"task-completed":""}" draggable="${canManageProject()}" data-task="${t.id}"><span class="priority-dot ${t.priority}">${t.priority}</span><div class="task-card-title"><input type="checkbox" class="task-completion-toggle" data-task-complete="${t.id}" aria-label="Mark ${esc(t.title)} as completed" ${completed?"checked":""} ${canCollaborateProject()?"":"disabled"}><h4>${esc(t.title)}</h4></div><p>${esc(t.description||"No description")}</p>
     ${t.progress?`<div class="card-progress"><i style="width:${t.progress}%"></i></div>`:""}
     <div class="task-foot"><span>${t.end_at?`◷ ${dateTime(t.end_at)}`:t.due_date?`◷ ${date(t.due_date)}`:`#${t.id}`}</span>${checklist}<div class="avatar-stack">${assignees.slice(0,3).map(u=>`<b class="avatar" title="${esc(u.name)}">${esc(u.name.slice(0,2).toUpperCase())}</b>`).join("")}${assignees.length>3?`<b class="avatar">+${assignees.length-3}</b>`:!assignees.length?'<b class="avatar">—</b>':""}</div></div></article>`;
 }
@@ -486,16 +507,27 @@ function bindView() {
     if(!project)return;
     state.project=project;
     localStorage.setItem(`orbit_project_${state.workspace.id}`,state.project.id);
-    try{await loadProject();navigate("board")}catch(err){toast(`Could not open project: ${err.message}`,true)}
+    navigate("board");
+    try{await loadProject();render()}catch(err){state.projectLoading=false;toast(`Could not open project: ${err.message}`,true)}
   });
   $$("[data-edit-project]").forEach(button=>button.onclick=event=>{event.stopPropagation();projectEditModal(state.projects.find(project=>project.id===Number(button.dataset.editProject)))});
   $("#new-project")?.addEventListener("click", projectModal); $("#new-task-view")?.addEventListener("click",()=>taskModal());
   $("#gantt-new-task")?.addEventListener("click",()=>taskModal());
   $("#new-sprint")?.addEventListener("click", sprintModal); $("#add-member")?.addEventListener("click", memberModal); $("#new-team")?.addEventListener("click",()=>teamModal());
   $$("[data-edit-sprint]").forEach(button=>button.onclick=()=>sprintModal(state.sprints.find(sprint=>sprint.id===Number(button.dataset.editSprint))));
-  $("#project-select")?.addEventListener("change", async e=>{state.project=state.projects.find(p=>p.id===Number(e.target.value));localStorage.setItem(`orbit_project_${state.workspace.id}`,state.project.id);await loadProject();render()});
+  $("#project-select")?.addEventListener("change", async e=>{state.project=state.projects.find(p=>p.id===Number(e.target.value));localStorage.setItem(`orbit_project_${state.workspace.id}`,state.project.id);try{await loadProject();render()}catch(err){state.projectLoading=false;toast(err.message,true)}});
   $("#sprint-filter")?.addEventListener("change", e=>{const value=e.target.value;$$(".task-card").forEach(card=>{const task=state.tasks.find(t=>t.id===Number(card.dataset.task));card.classList.toggle("hidden",value==="backlog"?task.sprint_id!==null:Boolean(value)&&task.sprint_id!==Number(value))})});
   $$("[data-task]").forEach(x=>x.onclick=()=>taskDetail(Number(x.dataset.task)));
+  $$("[data-task-complete]").forEach(input=>input.onclick=async event=>{
+    event.stopPropagation();
+    const completed=input.checked;
+    input.disabled=true;
+    try{
+      await api(`/tasks/${input.dataset.taskComplete}/completion`,{method:"PATCH",body:JSON.stringify({is_completed:completed})});
+      await loadWorkspace();
+      toast(completed?"Task moved to the last list":"Task reopened in the first list");
+    }catch(error){input.checked=!completed;input.disabled=false;toast(error.message,true)}
+  });
   $$("[data-add-to]").forEach(x=>x.onclick=()=>taskModal(null,Number(x.dataset.addTo)));
   $$("[data-column-menu]").forEach(x=>x.onclick=e=>{e.stopPropagation();columnModal(Number(x.dataset.columnMenu))});
   $("#add-column")?.addEventListener("click",()=>columnModal());
@@ -664,7 +696,7 @@ function projectModal(){
   ${selectField("framework","Work framework",[["kanban","Kanban — continuous flow"],["scrum","Scrum — sprint planning"]],"kanban")}
   ${selectField("status","Status",["planned","active","on_hold","completed"])}${selectField("priority","Priority",["low","medium","high","critical"],"medium")}
   ${selectField("project_manager_id","Project admin",projectAdmins.map(member=>[member.user_id,member.user.name]),state.user.id)}
-  ${field("deadline","Deadline","date")}${field("budget","Budget","number","Optional")}`,"Create project"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
+  ${field("start_date","Start date","date","",true)}${field("end_date","End date","date","",true)}${field("budget","Budget","number","Optional")}`,"Create project"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
     const framework=data.framework;delete data.framework;data.project_manager_id=Number(data.project_manager_id);if(data.budget)data.budget=Number(data.budget);const p=await api(`/workspaces/${workspaceId}/projects`,{method:"POST",body:JSON.stringify(data)});await api(`/projects/${p.id}/board`,{method:"PUT",body:JSON.stringify({framework})});state.projects.unshift(p);state.project=p;localStorage.setItem(`orbit_project_${workspaceId}`,p.id);await loadWorkspace();toast(`${pretty(framework)} project created`);
   }));}
 function projectEditModal(project){
@@ -676,7 +708,8 @@ function projectEditModal(project){
     ${selectField("status","Status",["planned","active","on_hold","completed"],project.status)}
     ${selectField("priority","Priority",["low","medium","high","critical"],project.priority)}
     ${selectField("project_manager_id","Project admin",projectAdmins.map(member=>[member.user_id,member.user.name]),project.project_manager_id||state.user.id)}
-    ${field("deadline","Deadline","date","","",false,project.deadline)}
+    ${field("start_date","Start date","date","",true,false,project.start_date)}
+    ${field("end_date","End date","date","",true,false,project.end_date)}
     ${field("budget","Budget","number","Optional","",false,project.budget)}`,
     "Save changes",`<button type="button" id="delete-project" class="btn danger">Delete project</button>`),()=>{
       $("#modal-form").onsubmit=async event=>submitForm(event,async data=>{
@@ -728,6 +761,7 @@ function taskModal(task=null,targetColumnId=null){
   <fieldset class="field full assignee-field"><legend>Assignees · select multiple</legend><div id="task-assignee-options" class="assignee-options">${assigneeOptions(selectedTeamId)}</div>${isAdmin()?'<button type="button" id="manage-team-allocations" class="team-management-link">Manage team allocations <span>→</span></button>':""}</fieldset>
   ${field("story_points","Story points","number","0–100","",false,task?.story_points)}${field("due_date","Due date","date","","",false,task?.due_date)}
   ${field("start_at","Start date & time","datetime-local","","",false,inputDateTime(task?.start_at))}${field("end_at","End date & time","datetime-local","","",false,inputDateTime(task?.end_at))}
+  <div class="field full project-date-rule"><strong>Allowed project dates</strong><span>${date(state.project.start_date)} → ${date(state.project.end_date)}. Dates outside this range cannot be saved.</span></div>
   ${progressField(task?.progress??0)}`,task?"Save changes":"Create task",task?`<button type="button" id="delete-task" class="btn danger">Delete</button>`:""),()=>{
     const progress=$("#task-progress");
     const updateProgress=()=>{
@@ -742,6 +776,8 @@ function taskModal(task=null,targetColumnId=null){
     });
     $("#manage-team-allocations")?.addEventListener("click",()=>{closeModal();navigate("people");toast("Allocate members to this team and project, then return to the task")});
     $("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
+      const dateOnly=value=>value?value.slice(0,10):null,start=dateOnly(data.start_at)||data.start_date,end=dateOnly(data.end_at)||data.due_date;
+      if((start&&start<state.project.start_date)||(end&&end>state.project.end_date)||(start&&end&&end<start))throw new Error(`Task dates must be between ${date(state.project.start_date)} and ${date(state.project.end_date)}`);
       data.assignee_ids=$$('input[name="assignee_ids"]:checked',e.currentTarget).map(input=>Number(input.value));
       delete data.assignment_team_id;
       ["sprint_id","story_points","progress"].forEach(k=>{if(data[k]!==null)data[k]=Number(data[k])});
@@ -837,7 +873,7 @@ function aiTaskPlannerModal(){
   modal(formShell("Plan tasks with AI",`Describe the outcome you want for ${esc(state.project.name)}. You will review every task before it is created.`,`
     ${field("prompt","What should this project deliver?","textarea","Example: Build a secure mobile application with authentication, payments, testing, and deployment.",true,true)}
     ${field("maximum_tasks","Maximum tasks","number","10",true,false,10)}
-    <div class="field full ai-note"><strong>Safe preview</strong><span>AI generates a draft only. No board data changes until you confirm the selected tasks.</span></div>
+    <div class="field full ai-note"><strong>Project schedule</strong><span>AI distributes tasks between ${date(state.project.start_date)} and ${date(state.project.end_date)}. Dates and checklists remain editable before confirmation.</span></div>
     <div id="ai-plan-status" class="ai-plan-status hidden" role="status" aria-live="polite"><i></i><span>Contacting AI providers and building your task plan...</span></div>`,
     "Generate task plan"),()=>{
       const form=$("#modal-form");
@@ -879,7 +915,10 @@ function aiTaskPreviewModal(plan){
           <div class="ai-task-meta">
             <select class="ai-task-priority">${["low","medium","high","critical"].map(value=>`<option value="${value}" ${value===task.priority?"selected":""}>${pretty(value)}</option>`).join("")}</select>
             <input class="ai-task-points" type="number" min="0" max="100" placeholder="Story points" value="${task.story_points??""}">
+            <label>Start date<input class="ai-task-start" type="date" min="${state.project.start_date}" max="${state.project.end_date}" value="${task.start_date||state.project.start_date}" required></label>
+            <label>End date<input class="ai-task-end" type="date" min="${state.project.start_date}" max="${state.project.end_date}" value="${task.end_date||state.project.end_date}" required></label>
           </div>
+          <label class="ai-checklist-label">Checklist · one item per line<textarea class="ai-task-checklist" placeholder="Verify acceptance criteria\nComplete review">${esc((task.checklist||[]).join("\n"))}</textarea></label>
         </div>
       </article>`).join("")}</div>
       <div id="ai-create-status" class="ai-plan-status hidden" role="status" aria-live="polite"><i></i><span>Creating selected tasks and placing them in Backlog...</span></div>
@@ -895,10 +934,14 @@ function aiTaskPreviewModal(plan){
             title:$(".ai-task-title",row).value.trim(),
             description:$(".ai-task-description",row).value.trim()||null,
             priority:$(".ai-task-priority",row).value,
-            story_points:$(".ai-task-points",row).value===""?null:Number($(".ai-task-points",row).value)
+            story_points:$(".ai-task-points",row).value===""?null:Number($(".ai-task-points",row).value),
+            start_date:$(".ai-task-start",row).value,
+            end_date:$(".ai-task-end",row).value,
+            checklist:$(".ai-task-checklist",row).value.split("\n").map(value=>value.trim()).filter(Boolean)
           }));
         if(!tasks.length){error.textContent="Select at least one task.";error.classList.remove("hidden");return}
         if(tasks.some(task=>task.title.length<2)){error.textContent="Every selected task needs a title.";error.classList.remove("hidden");return}
+        if(tasks.some(task=>!task.start_date||!task.end_date||task.start_date<state.project.start_date||task.end_date>state.project.end_date||task.end_date<task.start_date)){error.textContent=`Every task must be scheduled between ${date(state.project.start_date)} and ${date(state.project.end_date)}.`;error.classList.remove("hidden");return}
         error.classList.add("hidden");status.classList.remove("hidden");
         button.disabled=true;button.textContent="Creating tasks...";
         try{

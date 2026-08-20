@@ -217,7 +217,15 @@ class ProjectCreate(BaseModel):
     priority: Priority = Priority.medium
     budget: int | None = Field(default=None, ge=0)
     deadline: date | None = None
+    start_date: date
+    end_date: date
     project_manager_id: int | None = None
+
+    @model_validator(mode="after")
+    def validate_project_dates(self):
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must be on or after start_date")
+        return self
 
 
 class ProjectUpdate(BaseModel):
@@ -227,6 +235,8 @@ class ProjectUpdate(BaseModel):
     priority: Priority | None = None
     budget: int | None = Field(default=None, ge=0)
     deadline: date | None = None
+    start_date: date | None = None
+    end_date: date | None = None
     project_manager_id: int | None = None
 
 
@@ -239,6 +249,8 @@ class ProjectRead(ORMModel):
     priority: Priority
     budget: int | None
     deadline: date | None
+    start_date: date
+    end_date: date
     project_manager_id: int | None
     created_at: datetime
 
@@ -314,6 +326,10 @@ class TaskUpdate(BaseModel):
         return self
 
 
+class TaskCompletionUpdate(BaseModel):
+    is_completed: bool
+
+
 class TaskRead(ORMModel):
     id: int
     project_id: int
@@ -347,6 +363,18 @@ class AIGeneratedTask(BaseModel):
     description: str | None = Field(default=None, max_length=3000)
     priority: Priority = Priority.medium
     story_points: int | None = Field(default=None, ge=0, le=100)
+    start_date: date | None = None
+    end_date: date | None = None
+    checklist: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_generated_dates(self):
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValueError("end_date must be on or after start_date")
+        self.checklist = list(dict.fromkeys(
+            item.strip() for item in self.checklist if item.strip()
+        ))
+        return self
 
 
 class AIGeneratedPlan(BaseModel):
