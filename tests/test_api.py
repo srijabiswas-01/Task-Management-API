@@ -220,6 +220,131 @@ def test_projects_require_valid_dates_and_are_scoped_to_workspace(
     ).json() == []
 
 
+def test_global_member_directory_survives_workspace_team_and_allocation_deletion(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    registered = client.post(
+        "/auth/register",
+        json={"name": "Global Member", "email": "global@example.com", "password": "securepass123"},
+    ).json()
+    first = client.post(
+        "/workspaces", json={"name": "First global directory"}, headers=auth_headers
+    ).json()
+    second = client.post(
+        "/workspaces", json={"name": "Second global directory"}, headers=auth_headers
+    ).json()
+    client.patch(
+        f"/workspaces/{first['id']}/users/{registered['id']}/approve",
+        headers=auth_headers,
+    )
+    for workspace in (first, second):
+        directory = client.get(
+            f"/workspaces/{workspace['id']}/user-directory", headers=auth_headers
+        ).json()
+        assert "global@example.com" in {user["email"] for user in directory}
+
+    client.post(
+        f"/workspaces/{first['id']}/designations",
+        json={"name": "Developer"}, headers=auth_headers,
+    )
+    project = client.post(
+        f"/workspaces/{first['id']}/projects",
+        json={"name": "Scoped project", "start_date": "2026-08-01", "end_date": "2026-12-31"},
+        headers=auth_headers,
+    ).json()
+    team = client.post(
+        f"/workspaces/{first['id']}/teams",
+        json={
+            "name": "Scoped team",
+            "manager_user_id": registered["id"],
+            "manager_designation": "Developer",
+        },
+        headers=auth_headers,
+    )
+    assert team.status_code == 201
+    allocation = client.post(
+        f"/workspaces/{first['id']}/teams/{team.json()['id']}/members",
+        json={
+            "user_id": registered["id"],
+            "project_id": project["id"],
+            "designation": "Developer",
+        },
+        headers=auth_headers,
+    )
+    assert allocation.status_code == 201
+    client.delete(
+        f"/workspaces/{first['id']}/teams/{team.json()['id']}/members/{allocation.json()['id']}",
+        headers=auth_headers,
+    )
+    assert "global@example.com" in {
+        user["email"] for user in client.get(
+            f"/workspaces/{first['id']}/user-directory", headers=auth_headers
+        ).json()
+    }
+    assert client.delete(f"/workspaces/{first['id']}", headers=auth_headers).status_code == 204
+    assert "global@example.com" in {
+        user["email"] for user in client.get(
+            f"/workspaces/{second['id']}/user-directory", headers=auth_headers
+        ).json()
+    }
+
+
+def test_designations_and_departments_are_shared_by_every_workspace(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    first = client.post(
+        "/workspaces", json={"name": "Shared catalog one"}, headers=auth_headers
+    ).json()
+    second = client.post(
+        "/workspaces", json={"name": "Shared catalog two"}, headers=auth_headers
+    ).json()
+    designation = client.post(
+        f"/workspaces/{first['id']}/designations",
+        json={"name": "Product Designer"}, headers=auth_headers,
+    ).json()
+    department = client.post(
+        f"/workspaces/{first['id']}/departments",
+        json={"name": "Design"}, headers=auth_headers,
+    ).json()
+    assert [item["name"] for item in client.get(
+        f"/workspaces/{second['id']}/designations", headers=auth_headers
+    ).json()] == ["Product Designer"]
+    assert [item["name"] for item in client.get(
+        f"/workspaces/{second['id']}/departments", headers=auth_headers
+    ).json()] == ["Design"]
+
+    assert client.patch(
+        f"/workspaces/{second['id']}/designations/{designation['id']}",
+        json={"name": "Senior Product Designer"}, headers=auth_headers,
+    ).status_code == 200
+    assert client.patch(
+        f"/workspaces/{second['id']}/departments/{department['id']}",
+        json={"name": "Product Design"}, headers=auth_headers,
+    ).status_code == 200
+    third = client.post(
+        "/workspaces", json={"name": "Shared catalog three"}, headers=auth_headers
+    ).json()
+    assert [item["name"] for item in client.get(
+        f"/workspaces/{third['id']}/designations", headers=auth_headers
+    ).json()] == ["Senior Product Designer"]
+    assert [item["name"] for item in client.get(
+        f"/workspaces/{third['id']}/departments", headers=auth_headers
+    ).json()] == ["Product Design"]
+    for workspace in (first, second, third):
+        assert client.delete(
+            f"/workspaces/{workspace['id']}", headers=auth_headers
+        ).status_code == 204
+    recreated = client.post(
+        "/workspaces", json={"name": "Catalog after deletion"}, headers=auth_headers
+    ).json()
+    assert [item["name"] for item in client.get(
+        f"/workspaces/{recreated['id']}/designations", headers=auth_headers
+    ).json()] == ["Senior Product Designer"]
+    assert [item["name"] for item in client.get(
+        f"/workspaces/{recreated['id']}/departments", headers=auth_headers
+    ).json()] == ["Product Design"]
+
+
 def test_task_completion_moves_card_to_done_and_can_reopen(
     client: TestClient, auth_headers: dict[str, str]
 ):
@@ -240,6 +365,13 @@ def test_task_completion_moves_card_to_done_and_can_reopen(
         json={"title": "Complete this card"},
         headers=auth_headers,
     ).json()["id"]
+    for text in ("First acceptance item", "Second acceptance item"):
+        created_item = client.post(
+            f"/tasks/{task_id}/checklist",
+            json={"text": text},
+            headers=auth_headers,
+        )
+        assert created_item.status_code == 201
 
     completed = client.patch(
         f"/tasks/{task_id}/completion",
@@ -249,6 +381,11 @@ def test_task_completion_moves_card_to_done_and_can_reopen(
     assert completed.status_code == 200
     assert completed.json()["status"] == "done"
     assert completed.json()["progress"] == 100
+    completed_items = client.get(
+        f"/tasks/{task_id}/checklist", headers=auth_headers
+    ).json()
+    assert all(item["is_done"] for item in completed_items)
+    assert all(item["last_action"] == "completed" for item in completed_items)
     board = client.get(f"/projects/{project_id}/board", headers=auth_headers).json()
     done_column = next(column for column in board["columns"] if column["system_status"] == "done")
     assert board["task_positions"][str(task_id)]["column_id"] == done_column["id"]
@@ -261,6 +398,11 @@ def test_task_completion_moves_card_to_done_and_can_reopen(
     assert reopened.status_code == 200
     assert reopened.json()["status"] == "backlog"
     assert reopened.json()["progress"] == 0
+    reopened_items = client.get(
+        f"/tasks/{task_id}/checklist", headers=auth_headers
+    ).json()
+    assert all(not item["is_done"] for item in reopened_items)
+    assert all(item["last_action"] == "reopened" for item in reopened_items)
     board = client.get(f"/projects/{project_id}/board", headers=auth_headers).json()
     first_column = min(board["columns"], key=lambda column: column["position"])
     assert board["task_positions"][str(task_id)]["column_id"] == first_column["id"]
@@ -727,15 +869,13 @@ def test_team_allocation_controls_member_collaboration_access(
     projects = client.get(
         f"/workspaces/{workspace_id}/projects", headers=member_headers
     ).json()
-    assert {project["id"] for project in projects} == {
-        visible_project["id"], hidden_project["id"]
-    }
+    assert {project["id"] for project in projects} == {visible_project["id"]}
     assert client.get(
         f"/projects/{visible_project['id']}/board", headers=member_headers
     ).status_code == 200
     assert client.get(
         f"/projects/{hidden_project['id']}", headers=member_headers
-    ).status_code == 200
+    ).status_code == 404
     assert client.post(
         f"/projects/{visible_project['id']}/tasks",
         json={"title": "Member cannot create this"},
@@ -768,6 +908,12 @@ def test_team_allocation_controls_member_collaboration_access(
     assert completed.status_code == 200
     assert completed.json()["last_action_by_id"] == teammate["id"]
     assert completed.json()["last_action"] == "completed"
+    member_dashboard = client.get(
+        f"/workspaces/{workspace_id}/dashboard", headers=member_headers
+    )
+    assert member_dashboard.status_code == 200
+    assert member_dashboard.json()["projects"] == 1
+    assert member_dashboard.json()["tasks"] == 1
 
     hidden_task = client.post(
         f"/projects/{hidden_project['id']}/tasks",
@@ -778,7 +924,7 @@ def test_team_allocation_controls_member_collaboration_access(
         f"/tasks/{hidden_task['id']}/comments",
         json={"body": "Must not be accepted"},
         headers=member_headers,
-    ).status_code == 403
+    ).status_code == 404
 
     assert client.delete(
         f"/workspaces/{workspace_id}/teams/{team['id']}/members/{allocation.json()['id']}",
@@ -788,9 +934,10 @@ def test_team_allocation_controls_member_collaboration_access(
         f"/workspaces/{workspace_id}/designations/{designation['id']}",
         headers=auth_headers,
     ).status_code == 204
-    assert len(client.get(
+    assert client.get(
         f"/workspaces/{workspace_id}/projects", headers=member_headers
-    ).json()) == 2
+    ).status_code == 404
+    assert client.get("/workspaces", headers=member_headers).json() == []
     deactivated = client.patch(
         f"/workspaces/{workspace_id}/members/{workspace_member['id']}/access",
         json={"is_active": False},
@@ -824,7 +971,7 @@ def test_team_allocation_controls_member_collaboration_access(
     assert demoted.json()["role"] == "member"
     assert client.get(
         f"/workspaces/{workspace_id}/projects", headers=member_headers
-    ).status_code == 200
+    ).status_code == 404
     assert client.delete(
         f"/workspaces/{workspace_id}/users/{teammate['id']}",
         headers=auth_headers,

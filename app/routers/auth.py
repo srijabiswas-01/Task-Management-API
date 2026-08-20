@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from app.core.security import create_access_token, hash_password, verify_password
 from app.core.skills import normalize_skills
 from app.dependencies import CurrentUser, DB
-from app.models import Department, Designation, Project, TeamMember, User, UserProfile, WorkspaceMember
+from app.models import GlobalDepartment, GlobalDesignation, Project, TeamMember, User, UserProfile
 from app.schemas import Token, UserProfileRead, UserProfileUpdate, UserRead, UserRegister
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -92,23 +92,13 @@ def get_profile(db: DB, current_user: CurrentUser) -> UserProfileRead:
 def update_profile(
     payload: UserProfileUpdate, db: DB, current_user: CurrentUser
 ) -> UserProfileRead:
-    if payload.professional_title and db.scalar(
-        select(Designation.id).join(
-            WorkspaceMember, WorkspaceMember.workspace_id == Designation.workspace_id
-        ).where(
-            WorkspaceMember.user_id == current_user.id,
-            Designation.name == payload.professional_title,
-        )
-    ) is None:
+    if payload.professional_title and db.scalar(select(GlobalDesignation.id).where(
+        GlobalDesignation.name == payload.professional_title,
+    )) is None:
         raise HTTPException(status_code=400, detail="Select a valid designation")
-    if payload.department and db.scalar(
-        select(Department.id).join(
-            WorkspaceMember, WorkspaceMember.workspace_id == Department.workspace_id
-        ).where(
-            WorkspaceMember.user_id == current_user.id,
-            Department.name == payload.department,
-        )
-    ) is None:
+    if payload.department and db.scalar(select(GlobalDepartment.id).where(
+        GlobalDepartment.name == payload.department,
+    )) is None:
         raise HTTPException(status_code=400, detail="Select a valid department")
     current_user.name = payload.name.strip()
     profile = db.scalar(select(UserProfile).where(UserProfile.user_id == current_user.id))

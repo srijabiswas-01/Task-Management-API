@@ -63,6 +63,7 @@ class WorkspaceRead(ORMModel):
     name: str
     description: str | None
     owner_id: int
+    role: WorkspaceRole | None = None
     created_at: datetime
 
 
@@ -129,7 +130,7 @@ class DesignationUpdate(BaseModel):
 
 class DesignationRead(ORMModel):
     id: int
-    workspace_id: int
+    workspace_id: int | None = None
     name: str
     description: str | None
     created_at: datetime
@@ -147,7 +148,7 @@ class DepartmentUpdate(BaseModel):
 
 class DepartmentRead(ORMModel):
     id: int
-    workspace_id: int
+    workspace_id: int | None = None
     name: str
     description: str | None
     created_at: datetime

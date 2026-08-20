@@ -52,6 +52,21 @@ def require_workspace_member(
         raise HTTPException(status_code=404, detail="Workspace not found")
     if not membership.is_active:
         raise HTTPException(status_code=403, detail="Your workspace access is inactive")
+    if membership.role != WorkspaceRole.admin:
+        allocated = db.scalar(
+            select(TeamMember.id)
+            .join(Team, Team.id == TeamMember.team_id)
+            .where(
+                Team.workspace_id == workspace_id,
+                TeamMember.user_id == user_id,
+            )
+        )
+        managed = db.scalar(select(Project.id).where(
+            Project.workspace_id == workspace_id,
+            Project.project_manager_id == user_id,
+        ))
+        if allocated is None and managed is None:
+            raise HTTPException(status_code=404, detail="Workspace not found")
     return membership
 
 

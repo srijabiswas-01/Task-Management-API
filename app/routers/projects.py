@@ -34,10 +34,16 @@ def validate_project_manager(db: DB, workspace_id: int, user_id: int) -> None:
 
 def accessible_project(db: DB, project_id: int, user_id: int) -> Project:
     project = db.get(Project, project_id)
-    if project is not None:
-        require_workspace_member(db, project.workspace_id, user_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
+    membership = require_workspace_member(db, project.workspace_id, user_id)
+    if membership.role != WorkspaceRole.admin and project.project_manager_id != user_id:
+        allocation = db.scalar(select(TeamMember.id).where(
+            TeamMember.project_id == project.id,
+            TeamMember.user_id == user_id,
+        ))
+        if allocation is None:
+            raise HTTPException(status_code=404, detail="Project not found")
     return project
 
 
@@ -82,8 +88,16 @@ def create_project(
 def list_projects(
     workspace_id: int, db: DB, current_user: CurrentUser
 ) -> list[Project]:
-    require_workspace_member(db, workspace_id, current_user.id)
+    membership = require_workspace_member(db, workspace_id, current_user.id)
     query = select(Project).where(Project.workspace_id == workspace_id)
+    if membership.role != WorkspaceRole.admin:
+        allocated_project_ids = select(TeamMember.project_id).where(
+            TeamMember.user_id == current_user.id
+        )
+        query = query.where(
+            (Project.project_manager_id == current_user.id) |
+            Project.id.in_(allocated_project_ids)
+        )
     return list(db.scalars(query.order_by(Project.created_at.desc())).all())
 
 

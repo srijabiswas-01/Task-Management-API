@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from app.dependencies import CurrentUser, DB, require_project_admin, require_project_contributor
+from app.dependencies import CurrentUser, DB, require_project_admin, require_project_contributor, require_workspace_member
 from app.models import (
     BoardColumn,
     ChecklistItem,
@@ -161,16 +161,12 @@ def move_task_to_board_edge(db: DB, task: Task, completed: bool) -> None:
 
 
 def accessible_task(db: DB, task_id: int, user_id: int) -> Task:
-    task = db.scalar(
-        select(Task)
-        .join(Project)
-        .join(
-            WorkspaceMember,
-            WorkspaceMember.workspace_id == Project.workspace_id,
-        )
-        .where(Task.id == task_id, WorkspaceMember.user_id == user_id)
-    )
+    task = db.get(Task, task_id)
     if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    try:
+        accessible_project(db, task.project_id, user_id)
+    except HTTPException:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
 
@@ -282,6 +278,19 @@ def update_task_completion(
 ) -> Task:
     task = accessible_task(db, task_id, current_user.id)
     require_project_contributor(db, task.project_id, current_user.id)
+    checklist_items = list(
+        db.scalars(select(ChecklistItem).where(ChecklistItem.task_id == task.id)).all()
+    )
+    for item in checklist_items:
+        if item.is_done == payload.is_completed:
+            continue
+        item.is_done = payload.is_completed
+        item.actions.append(
+            ChecklistAction(
+                user_id=current_user.id,
+                action="completed" if payload.is_completed else "reopened",
+            )
+        )
     task.status = TaskStatus.done if payload.is_completed else TaskStatus.backlog
     task.progress = 100 if payload.is_completed else 0
     move_task_to_board_edge(db, task, payload.is_completed)
@@ -466,15 +475,16 @@ def delete_checklist_item(
 def dashboard(
     workspace_id: int, db: DB, current_user: CurrentUser
 ) -> DashboardSummary:
-    membership = db.scalar(
-        select(WorkspaceMember).where(
-            WorkspaceMember.workspace_id == workspace_id,
-            WorkspaceMember.user_id == current_user.id,
-        )
-    )
-    if membership is None:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    membership = require_workspace_member(db, workspace_id, current_user.id)
     project_ids_query = select(Project.id).where(Project.workspace_id == workspace_id)
+    if membership.role != WorkspaceRole.admin:
+        allocated_project_ids = select(TeamMember.project_id).where(
+            TeamMember.user_id == current_user.id
+        )
+        project_ids_query = project_ids_query.where(
+            (Project.project_manager_id == current_user.id) |
+            Project.id.in_(allocated_project_ids)
+        )
     project_ids = list(db.scalars(project_ids_query).all())
     projects = db.scalar(
         select(func.count(Project.id)).where(Project.id.in_(project_ids))

@@ -7,11 +7,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.database import Base, engine
+from app.models import Department, Designation, GlobalDepartment, GlobalDesignation
 from app.routers import ai, auth, boards, projects, tasks, workspaces
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,22 @@ async def lifespan(_: FastAPI):
             "WHEN deadline IS NOT NULL AND deadline >= start_date THEN deadline "
             "ELSE start_date END WHERE end_date IS NULL"
         ))
+    with Session(engine) as db:
+        global_designations = {
+            item.name.casefold() for item in db.scalars(select(GlobalDesignation)).all()
+        }
+        for item in db.scalars(select(Designation).order_by(Designation.id)).all():
+            if item.name.casefold() not in global_designations:
+                db.add(GlobalDesignation(name=item.name, description=item.description))
+                global_designations.add(item.name.casefold())
+        global_departments = {
+            item.name.casefold() for item in db.scalars(select(GlobalDepartment)).all()
+        }
+        for item in db.scalars(select(Department).order_by(Department.id)).all():
+            if item.name.casefold() not in global_departments:
+                db.add(GlobalDepartment(name=item.name, description=item.description))
+                global_departments.add(item.name.casefold())
+        db.commit()
     yield
 
 

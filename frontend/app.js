@@ -10,7 +10,6 @@ const VIEW_PATHS = {
   projects: "/app/projects",
   board: "/app/board",
   gantt: "/app/gantt",
-  sprints: "/app/sprints",
   people: "/app/people",
   profile: "/app/profile",
   skills: "/app/skills",
@@ -184,6 +183,7 @@ function showAuth() {
 }
 $("#logout-button").onclick = () => logout();
 
+
 function profileFallback() {
   return {
     name: state.user?.name || "", email: state.user?.email || "", profile_image: null,
@@ -329,15 +329,20 @@ window.addEventListener("popstate", () => {
   render();
 });
 function render() {
-  if((state.view==="users"||state.view==="skills")&&!isAdmin())state.view="dashboard";
-  const names = {dashboard:"Overview",projects:"Projects",board:"Task board",gantt:"Gantt chart",sprints:"Sprints",people:"People & teams",profile:"My profile",skills:"Skills",users:"Users"};
+  if(["people","users","skills"].includes(state.view)&&!isAdmin()){
+    state.view="dashboard";
+    history.replaceState({view:"dashboard"},"",VIEW_PATHS.dashboard);
+  }
+  const names = {dashboard:"Overview",projects:"Projects",board:"Task board",gantt:"Gantt chart",people:"People & teams",profile:"My profile",skills:"Skills",users:"Users"};
   $("#page-title").textContent = names[state.view];
-  $('[data-view="sprints"]').classList.toggle("hidden", Boolean(state.project) && state.board?.framework !== "scrum");
-  $("#sprint-project-label").textContent = state.board?.framework==="scrum"&&state.project?state.project.name:"";
   $("#quick-task").classList.toggle("hidden", state.view !== "board" || !state.project || !canManageProject());
   $("#admin-users-nav").classList.toggle("hidden",!isAdmin());
   $("#admin-skills-nav").classList.toggle("hidden",!isAdmin());
-  $("#content").innerHTML = ({dashboard:dashboardView,projects:projectsView,board:boardView,gantt:ganttView,sprints:sprintsView,people:peopleView,profile:profileView,skills:skillsView,users:usersView}[state.view])();
+  $("#admin-people-nav").classList.toggle("hidden",!isAdmin());
+  const content=$("#content");
+  content.innerHTML = ({dashboard:dashboardView,projects:projectsView,board:boardView,gantt:ganttView,people:peopleView,profile:profileView,skills:skillsView,users:usersView}[state.view])();
+  content.classList.remove("view-enter");void content.offsetWidth;content.classList.add("view-enter");
+  $$(".stat-card,.project-card,.panel,.kanban-col,.sprint-row,.skill-member-card",content).forEach((item,index)=>item.style.setProperty("--enter-index",Math.min(index,10)));
   $$("#main-nav button").forEach(button => button.classList.toggle("active", button.dataset.view === state.view));
   bindView();
   document.body.classList.toggle("read-only", !canManageProject());
@@ -384,9 +389,10 @@ function projectCards(items){return items.length?items.map(p=>`<article class="p
 function projectSelector() {
   return `<select id="project-select">${state.projects.map(p=>`<option value="${p.id}" ${p.id===state.project?.id?"selected":""}>${esc(p.name)}</option>`).join("")}</select>`;
 }
+function boardWaitAnimation(){return `<div class="board-wait" role="status" aria-label="Loading project data"><div class="wait-board" aria-hidden="true"><div class="wait-column"><b></b><i></i><i></i></div><div class="wait-column"><b></b><i></i><i></i><i></i></div><div class="wait-column"><b></b><i></i></div><span class="wait-card"></span></div><div class="wait-dots" aria-hidden="true"><i></i><i></i><i></i></div></div>`}
 function boardView() {
   if (!state.project) return `${pageHeading("Task board","Visualize work as it moves through your workflow.",`<button id="new-project" class="btn primary">＋ New project</button>`)}${emptyMini("Create a project first","Tasks live inside projects.")}`;
-  if(state.projectLoading)return `${pageHeading("Task board",`Loading ${esc(state.project.name)}…`)}<div class="board-loading"><i></i><strong>Loading board and tasks…</strong><span>The board will be ready in a moment.</span></div>`;
+  if(state.projectLoading)return `${pageHeading("Task board",`Loading ${esc(state.project.name)}…`)}${boardWaitAnimation()}`;
   const columns = state.board?.columns || [];
   return `${pageHeading("Task board",`Drag tasks and lists to organize ${esc(state.project.name)}.`,`<div class="board-actions"><button id="export-board-pdf" class="btn">Download PDF</button><button id="ai-plan-tasks" class="btn ai-btn">AI plan</button><button id="customize-board" class="btn">⚙ Customize</button><button id="new-task-view" class="btn primary">＋ Add task</button></div>`)}
     <div class="toolbar">${projectSelector()}${state.board?.framework==="scrum"?`<select id="sprint-filter"><option value="">All Scrum work</option><option value="backlog">Product backlog</option>${state.sprints.map(s=>`<option value="${s.id}">${s.is_active?"● ":""}${esc(s.name)}</option>`).join("")}</select>`:""}<span class="framework-pill">${pretty(state.board?.framework||"kanban")} board</span></div>
@@ -408,6 +414,7 @@ function taskCard(t){
 }
 function ganttView() {
   if (!state.project) return `${pageHeading("Gantt chart","Plan tasks across a visual timeline.")}${emptyMini("Create a project first","Scheduled tasks will appear here.")}`;
+  if(state.projectLoading)return `${pageHeading("Gantt chart",`Loading ${esc(state.project.name)}…`)}${boardWaitAnimation()}`;
   const scheduled=state.tasks.map(task=>{
     const startValue=task.start_at||task.start_date;
     const endValue=task.end_at||task.due_date;
@@ -454,18 +461,30 @@ function profileView(){
   if(p.department&&!state.departments.some(item=>item.name===p.department))departmentOptions.push([p.department,p.department]);
   return `${pageHeading("My profile","Keep your personal and professional information up to date.")}
   <div class="profile-layout"><aside class="panel profile-summary"><div id="profile-photo-preview" class="profile-photo ${p.profile_image?"has-photo":""}" style="${p.profile_image?`background-image:url('${esc(p.profile_image)}')`:""}">${p.profile_image?"":esc(initials)}</div><h2>${esc(p.name||state.user.name)}</h2><p>${esc(p.professional_title||"Add your professional title")}</p><span>${esc(p.email||state.user.email)}</span><div class="profile-project-stat"><strong>${p.project_count||0}</strong><small>Projects worked on</small></div><div class="profile-skills">${skills.map(skill=>`<span>${esc(skill)}</span>`).join("")||"<small>Add skills to complete your profile.</small>"}</div><div class="profile-history"><h3>Project history</h3>${(p.projects||[]).map(name=>`<div><span class="project-icon">${esc(name[0]?.toUpperCase()||"P")}</span>${esc(name)}</div>`).join("")||"<small>No project history yet.</small>"}</div></aside>
-  <section class="panel profile-editor"><form id="profile-form"><h3>Profile photo</h3><div class="profile-photo-actions"><label class="btn" for="profile-image-input">Choose image</label><input id="profile-image-input" type="file" accept="image/png,image/jpeg,image/webp" hidden><button id="remove-profile-image" type="button" class="btn">Remove</button><small>PNG, JPG or WebP, maximum 2 MB.</small></div><h3>Personal details</h3><div class="form-grid">${field("name","Full name","text","Your full name",true,false,p.name||state.user.name)}${field("phone","Phone","tel","Phone number",false,false,p.phone)}${field("location","Location","text","City, country",false,false,p.location)}${field("bio","About me","textarea","A short introduction",false,true,p.bio)}<h3 class="profile-form-heading">Professional details</h3>${selectField("professional_title","Professional title · Designation",designationOptions,p.professional_title,"Select designation")}${selectField("department","Department",departmentOptions,p.department,"Select department")}${field("years_experience","Years of experience","number","0",false,false,p.years_experience)}${field("skills","Skills","textarea","One skill per line or comma separated",false,true,p.skills)}${field("achievements","Achievements","textarea","Awards, certifications and professional milestones",false,true,p.achievements)}</div><div id="profile-error" class="form-error hidden"></div><div class="modal-actions"><button class="btn primary" type="submit">Save profile</button></div></form></section></div>`;
+  <section class="panel profile-editor"><form id="profile-form"><h3>Profile photo</h3><div class="profile-photo-actions"><label class="btn" for="profile-image-input">Choose image</label><input id="profile-image-input" type="file" accept="image/png,image/jpeg,image/webp" hidden><button id="remove-profile-image" type="button" class="btn">Remove</button><small>PNG, JPG or WebP · minimum 128 × 128 px · 512 × 512 px recommended · maximum 2 MB.</small><small id="profile-image-error" class="image-upload-error hidden" role="alert"></small></div><h3>Personal details</h3><div class="form-grid">${field("name","Full name","text","Your full name",true,false,p.name||state.user.name)}${field("phone","Phone","tel","Phone number",false,false,p.phone)}${field("location","Location","text","City, country",false,false,p.location)}${field("bio","About me","textarea","A short introduction",false,true,p.bio)}<h3 class="profile-form-heading">Professional details</h3>${selectField("professional_title","Professional title · Designation",designationOptions,p.professional_title,"Select designation")}${selectField("department","Department",departmentOptions,p.department,"Select department")}${field("years_experience","Years of experience","number","0",false,false,p.years_experience)}${field("skills","Skills","textarea","One skill per line or comma separated",false,true,p.skills)}${field("achievements","Achievements","textarea","Awards, certifications and professional milestones",false,true,p.achievements)}</div><div id="profile-error" class="form-error hidden"></div><div class="modal-actions"><button class="btn primary" type="submit">Save profile</button></div></form></section></div>`;
 }
 function bindProfileView(){
   const form=$("#profile-form");if(!form)return;
   enhanceSkillInputs(form);
   let profileImage=state.profile?.profile_image||null;
-  $("#profile-image-input").onchange=event=>{
-    const file=event.target.files[0];if(!file)return;
-    if(file.size>2*1024*1024){toast("Profile image must be smaller than 2 MB",true);event.target.value="";return}
-    const reader=new FileReader();reader.onload=()=>{profileImage=reader.result;const preview=$("#profile-photo-preview");preview.textContent="";preview.style.backgroundImage=`url("${profileImage}")`;preview.classList.add("has-photo")};reader.readAsDataURL(file);
+  const imageError=$("#profile-image-error"),imageInput=$("#profile-image-input"),preview=$("#profile-photo-preview");
+  const showImageError=message=>{imageError.textContent=message;imageError.classList.remove("hidden");toast(message,true)};
+  const clearImageError=()=>{imageError.textContent="";imageError.classList.add("hidden")};
+  const resetImagePreview=()=>{preview.style.backgroundImage="";preview.textContent=(state.profile?.name||state.user.name).slice(0,2).toUpperCase();preview.classList.remove("has-photo")};
+  const inspectImage=source=>new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>resolve(image);image.onerror=()=>reject(new Error("The image could not be loaded. It may be corrupted or unreadable."));image.src=source});
+  imageInput.onchange=async event=>{
+    const file=event.target.files[0];if(!file)return;clearImageError();
+    if(!["image/png","image/jpeg","image/webp"].includes(file.type)){showImageError("Unsupported image type. Choose a PNG, JPG or WebP image.");event.target.value="";return}
+    if(file.size>2*1024*1024){showImageError("Image is too large. The maximum allowed size is 2 MB.");event.target.value="";return}
+    try{
+      const source=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error("The selected image file could not be read."));reader.readAsDataURL(file)});
+      const image=await inspectImage(source);
+      if(image.naturalWidth<128||image.naturalHeight<128)throw new Error(`Image is ${image.naturalWidth} × ${image.naturalHeight} px. Minimum required size is 128 × 128 px.`);
+      profileImage=source;preview.textContent="";preview.style.backgroundImage=`url("${profileImage}")`;preview.classList.add("has-photo");
+    }catch(error){showImageError(error.message||"The image could not be loaded.");event.target.value=""}
   };
-  $("#remove-profile-image").onclick=()=>{profileImage=null;const preview=$("#profile-photo-preview");preview.style.backgroundImage="";preview.textContent=state.user.name.slice(0,2).toUpperCase();preview.classList.remove("has-photo")};
+  if(profileImage)inspectImage(profileImage).catch(()=>{profileImage=null;resetImagePreview();showImageError("Your saved profile image could not be loaded. Please choose another image.")});
+  $("#remove-profile-image").onclick=()=>{profileImage=null;imageInput.value="";clearImageError();resetImagePreview()};
   form.onsubmit=async event=>{event.preventDefault();const button=$('button[type="submit"]',form),error=$("#profile-error");button.disabled=true;try{const data=formData(form);data.profile_image=profileImage;if(data.years_experience!==null)data.years_experience=Number(data.years_experience);state.profile=await api("/auth/profile",{method:"PUT",body:JSON.stringify(data)});state.user.name=state.profile.name;$("#user-name").textContent=state.profile.name;$("#user-avatar").textContent=state.profile.profile_image?"":state.profile.name.slice(0,2).toUpperCase();$("#user-avatar").style.backgroundImage=state.profile.profile_image?`url("${state.profile.profile_image}")`:"";$("#user-avatar").classList.toggle("has-photo",Boolean(state.profile.profile_image));render();toast("Profile updated")}catch(err){error.textContent=err.message;error.classList.remove("hidden")}finally{button.disabled=false}};
 }
 function skillsView(){
@@ -501,6 +520,7 @@ function bindUserDirectoryActions(){
 }
 function bindView() {
   bindSkillsView();
+  bindPeoplePagination();
   $$("[data-go]").forEach(x=>x.onclick=()=>navigate(x.dataset.go));
   $$("[data-project]").forEach(x=>x.onclick=async()=>{
     const project=state.projects.find(p=>p.id===Number(x.dataset.project));
@@ -509,6 +529,12 @@ function bindView() {
     localStorage.setItem(`orbit_project_${state.workspace.id}`,state.project.id);
     navigate("board");
     try{await loadProject();render()}catch(err){state.projectLoading=false;toast(`Could not open project: ${err.message}`,true)}
+  });
+  $$("[data-people-workspace]").forEach(button=>button.onclick=async()=>{
+    const workspace=state.workspaces.find(item=>item.id===Number(button.dataset.peopleWorkspace));
+    if(!workspace||workspace.id===state.workspace?.id)return;
+    state.workspace=workspace;state.project=null;state.projects=[];state.tasks=[];state.sprints=[];state.board=null;state.dashboard=null;state.members=[];state.teams=[];state.teamMembers=[];state.designations=[];state.departments=[];state.userDirectory=[];state.skillCatalog=[];state.skillMembers=[];
+    localStorage.setItem("orbit_workspace",workspace.id);updateWorkspaceUI();await loadWorkspace();
   });
   $$("[data-edit-project]").forEach(button=>button.onclick=event=>{event.stopPropagation();projectEditModal(state.projects.find(project=>project.id===Number(button.dataset.editProject)))});
   $("#new-project")?.addEventListener("click", projectModal); $("#new-task-view")?.addEventListener("click",()=>taskModal());
@@ -750,7 +776,7 @@ function taskModal(task=null,targetColumnId=null){
   const assigneeOptions=teamId=>{
     if(!teamId)return `<span class="subtitle">Select a team to see its allocated project members.</span>`;
     const userIds=[...new Set(projectAllocations.filter(a=>a.team_id===Number(teamId)).map(a=>a.user_id))];
-    const members=userIds.map(id=>state.members.find(m=>m.user_id===id)).filter(Boolean);
+    const members=userIds.map(id=>state.members.find(m=>m.user_id===id)||(()=>{const user=state.userDirectory.find(item=>item.user_id===id);return user?{user_id:id,user}:null})()).filter(Boolean);
     return members.map(m=>`<label><input type="checkbox" name="assignee_ids" value="${m.user_id}" ${currentAssignees.includes(m.user_id)?"checked":""}><span class="avatar">${esc(m.user.name.slice(0,2).toUpperCase())}</span><span>${esc(m.user.name)}<small>${esc(projectAllocations.find(a=>a.team_id===Number(teamId)&&a.user_id===m.user_id)?.designation||"")}</small></span></label>`).join("")||`<span class="subtitle">No members are allocated to this team for ${esc(state.project.name)}.</span>`;
   };
   modal(formShell(task?"Edit task":"Create a task",task?"Update task details and progress.":`Add work to ${esc(state.project.name)}.`,`
@@ -832,8 +858,9 @@ async function memberModal(){
   }catch(err){toast(err.message,true)}
 }
 function teamModal(team=null){
-  if(!state.members.length||!state.designations.length){toast("Add workspace members and designations before creating a team",true);return}
-  modal(formShell(team?"Edit team":"Create a team",team?"Update the team, manager and purpose.":"Every team requires a designated manager.",`${field("name","Team name","text","e.g. Design",true,false,team?.name)}${field("description","Description","textarea","What does this team own?",false,true,team?.description)}${selectField("manager_user_id","Team manager",state.members.map(member=>[member.user_id,member.user.name]),team?.manager_user_id||state.user.id)}${selectField("manager_designation","Manager designation",state.designations.map(item=>[item.name,item.name]),team?.manager_designation||"")}`,team?"Save changes":"Create team"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{data.manager_user_id=Number(data.manager_user_id);const saved=await api(team?`/workspaces/${state.workspace.id}/teams/${team.id}`:`/workspaces/${state.workspace.id}/teams`,{method:team?"PATCH":"POST",body:JSON.stringify(data)});if(team)state.teams=state.teams.map(item=>item.id===saved.id?saved:item);else state.teams.unshift(saved);toast(team?"Team updated":"Team created")}));
+  const managers=state.userDirectory.filter(user=>user.is_active);
+  if(!managers.length||!state.designations.length){toast("Add a designation and approve at least one registered user before creating a team",true);return}
+  modal(formShell(team?"Edit team":"Create a team",team?"Update the team, manager and purpose.":"Every team requires a designated manager.",`${field("name","Team name","text","e.g. Design",true,false,team?.name)}${field("description","Description","textarea","What does this team own?",false,true,team?.description)}${selectField("manager_user_id","Team manager",managers.map(user=>[user.user_id,user.name]),team?.manager_user_id||state.user.id)}${selectField("manager_designation","Manager designation",state.designations.map(item=>[item.name,item.name]),team?.manager_designation||"")}`,team?"Save changes":"Create team"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{data.manager_user_id=Number(data.manager_user_id);const saved=await api(team?`/workspaces/${state.workspace.id}/teams/${team.id}`:`/workspaces/${state.workspace.id}/teams`,{method:team?"PATCH":"POST",body:JSON.stringify(data)});if(team)state.teams=state.teams.map(item=>item.id===saved.id?saved:item);else state.teams.unshift(saved);toast(team?"Team updated":"Team created")}));
 }
 function columnModal(columnId=null){
   const column=state.board?.columns.find(item=>item.id===columnId);
@@ -967,18 +994,57 @@ function progressField(value=0){
 function formShell(title,subtitle,fields,submit,extra=""){return `<h2>${title}</h2><p class="subtitle">${subtitle}</p><form id="modal-form"><div class="form-grid">${fields}</div><div id="modal-error" class="form-error hidden"></div><div class="modal-actions">${extra}<button type="button" class="btn" onclick="document.querySelector('#modal-close').click()">Cancel</button><button class="btn primary">${submit}</button></div></form>`}
 
 function peopleView() {
+  if(!isAdmin())return emptyMini("Admin access required","Only workspace admins can manage people and teams.");
   const admin=isAdmin();
-  const action=admin?`<button id="add-member" class="btn primary">＋ Add member</button>`:`<span class="readonly-pill">View only</span>`;
-  return `${pageHeading("People & teams","Allocate members to a team and a specific project.",action)}
-  <div class="people-grid"><section class="panel"><div class="panel-header"><h3>Workspace members</h3><span class="member-count">${state.members.length}</span></div>
-    ${state.members.map(m=>{const projectCount=new Set(state.teamMembers.filter(a=>a.user_id===m.user_id).map(a=>a.project_id)).size;return `<div class="member-row"><button class="member-profile-trigger" data-member-details="${m.user_id}" aria-label="View ${esc(m.user.name)}'s project assignments"><b class="avatar">${esc(m.user.name.slice(0,2).toUpperCase())}</b><span class="member-copy"><strong>${esc(m.user.name)}</strong><small>${esc(m.user.email)}</small><span class="member-professional">${esc([m.professional_title,m.department].filter(Boolean).join(" · ")||"Professional details not set")}</span><span class="project-count">${projectCount} project${projectCount===1?"":"s"}</span></span></button><span class="badge ${m.role}">${m.role}</span>${admin?`<button class="edit-action member-edit-action" data-edit-member-profile="${m.id}">Edit details</button>`:""}${admin&&m.user_id!==state.user.id?`<button class="remove-action" data-remove-member="${m.id}">Remove</button>`:""}</div>`}).join("")}
+  const adminWorkspaces=state.workspaces.filter(workspace=>workspace.role==="admin"||workspace.owner_id===state.user.id);
+  const directory=state.userDirectory;
+  const action=`<span class="member-count">${directory.length} registered</span>`;
+  return `${pageHeading("People & teams","Global member directory with workspace-specific teams and allocations.",action)}
+  <div class="people-workspace-switcher"><span>Admin workspaces</span>${adminWorkspaces.map(workspace=>`<button data-people-workspace="${workspace.id}" class="${workspace.id===state.workspace.id?"active":""}">${esc(workspace.name)}</button>`).join("")}</div>
+  <div class="people-grid"><section class="panel global-members-panel"><div class="panel-header"><h3>Global members</h3><span class="member-count">${directory.length}</span></div><div class="panel-search"><input id="global-member-search" placeholder="Search member name or email"><button id="global-member-search-button" type="button">Reset</button></div>
+    ${directory.map(user=>{const projectCount=new Set(state.teamMembers.filter(a=>a.user_id===user.user_id).map(a=>a.project_id)).size;const access=user.role?pretty(user.role):user.is_active?"Registered":"Pending";return `<div class="member-row"><button class="member-profile-trigger" data-member-details="${user.user_id}" aria-label="View ${esc(user.name)}'s project assignments">${avatar(user)}<span class="member-copy"><strong>${esc(user.name)}</strong><small>${esc(user.email)}</small><span class="member-professional">${esc([user.professional_title,user.department].filter(Boolean).join(" · ")||"Professional details not set")}</span><span class="project-count">${projectCount} project${projectCount===1?"":"s"} in this workspace</span></span></button><span class="badge ${user.role||""}">${access}</span><button class="edit-action member-edit-action" data-global-member-profile="${user.user_id}">Edit details</button></div>`}).join("")}
   </section><section class="panel"><div class="panel-header"><h3>Teams</h3>${admin?'<button id="new-team">＋ New team</button>':`<span class="member-count">${state.teams.length}</span>`}</div>
     ${state.teams.length?state.teams.map(t=>{const allocations=state.teamMembers.filter(item=>item.team_id===t.id);return `<article class="team-card"><div class="team-card-head"><div><h4>${esc(t.name)}</h4><p>${esc(t.description||"No description")}</p>${t.manager_user?`<div class="team-manager"><b class="avatar">${esc(t.manager_user.name.slice(0,2).toUpperCase())}</b><span><small>TEAM MANAGER</small><strong>${esc(t.manager_user.name)}</strong><em>${esc(t.manager_designation)}</em></span></div>`:`<span class="manager-missing">Manager not assigned · use Edit</span>`}</div>${admin?`<div class="team-actions"><button data-allocate-team="${t.id}">＋ Allocate</button><button class="edit-action" data-edit-team="${t.id}">✎ Edit</button><button class="remove-action" data-delete-team="${t.id}">Delete</button></div>`:""}</div><div class="team-member-list">${allocations.length?allocations.map(a=>`<div class="team-member-row"><b class="avatar">${esc(a.user.name.slice(0,2).toUpperCase())}</b><div><strong>${esc(a.user.name)}</strong><small>${esc(a.designation)} · ${esc(a.project.name)}</small></div>${admin?`<button class="remove-action" data-remove-allocation="${a.id}" data-team-id="${t.id}">Remove</button>`:""}</div>`).join(""):'<p class="team-empty">No allocated members yet.</p>'}</div></article>`}).join(""):emptyMini("No teams yet","Create a team for a focused group.")}
   </section><section class="panel designation-panel"><div class="panel-header"><h3>Designations</h3>${admin?'<button id="new-designation">＋ Add designation</button>':`<span class="member-count">${state.designations.length}</span>`}</div><div class="designation-list">${state.designations.length?state.designations.map(item=>`<div class="designation-row"><div><strong>${esc(item.name)}</strong><small>${esc(item.description||"No description")}</small></div>${admin?`<div><button data-edit-designation="${item.id}">Edit</button><button class="remove-action" data-delete-designation="${item.id}">Delete</button></div>`:""}</div>`).join(""):emptyMini("No designations yet","Add job roles before allocating team members.")}</div></section><section class="panel designation-panel"><div class="panel-header"><h3>Departments</h3>${admin?'<button id="new-department">＋ Add department</button>':`<span class="member-count">${state.departments.length}</span>`}</div><div class="designation-list">${state.departments.length?state.departments.map(item=>`<div class="designation-row"><div><strong>${esc(item.name)}</strong><small>${esc(item.description||"No description")}</small></div>${admin?`<div><button data-edit-department="${item.id}">Edit</button><button class="remove-action" data-delete-department="${item.id}">Delete</button></div>`:""}</div>`).join(""):emptyMini("No departments yet","Add departments such as IT, Management, Accounts or Marketing.")}</div></section></div>`;
 }
 
+function bindPeoplePagination(){
+  const memberPanel=$(".global-members-panel");
+  if(!memberPanel)return;
+  const teamPanel=memberPanel.nextElementSibling;
+  teamPanel.classList.add("teams-panel");
+  if(!$("#team-search",teamPanel)){
+    const search=document.createElement("div");
+    search.className="panel-search";
+    search.innerHTML='<input id="team-search" placeholder="Search team, manager or member"><button id="team-search-button" type="button">Reset</button>';
+    $(".panel-header",teamPanel).after(search);
+  }
+  const ensurePager=(panel,id)=>{
+    let pager=document.getElementById(id);
+    if(!pager){pager=document.createElement("div");pager.id=id;pager.className="panel-pagination";panel.append(pager)}
+    return pager;
+  };
+  const setup=(panel,itemSelector,inputId,buttonId,pagerId)=>{
+    const input=document.getElementById(inputId),button=document.getElementById(buttonId),pager=ensurePager(panel,pagerId);
+    let query="",page=1;
+    const apply=()=>{
+      const all=$$(itemSelector,panel),matches=all.filter(item=>!query||item.textContent.toLowerCase().includes(query));
+      const pages=Math.max(1,Math.ceil(matches.length/10));page=Math.min(page,pages);
+      all.forEach(item=>item.classList.add("pagination-hidden"));
+      matches.slice((page-1)*10,page*10).forEach(item=>item.classList.remove("pagination-hidden"));
+      pager.innerHTML=matches.length>10?`<button data-page="${page-1}" ${page===1?"disabled":""}>Previous</button><span>Page ${page} of ${pages} · ${matches.length} results</span><button data-page="${page+1}" ${page===pages?"disabled":""}>Next</button>`:`<span>${matches.length} result${matches.length===1?"":"s"}</span>`;
+      $$('[data-page]',pager).forEach(control=>control.onclick=()=>{page=Number(control.dataset.page);apply()});
+    };
+    const search=()=>{query=input.value.trim().toLowerCase();page=1;apply()};
+    button.onclick=()=>{input.value="";search()};input.onkeydown=event=>{if(event.key==="Enter"){event.preventDefault();search()}};input.oninput=search;
+    apply();
+  };
+  setup(memberPanel,".member-row","global-member-search","global-member-search-button","global-member-pagination");
+  setup(teamPanel,".team-card","team-search","team-search-button","team-pagination");
+}
+
 function memberDetailsModal(userId){
-  const member=state.members.find(m=>m.user_id===userId);
+  const member=state.userDirectory.find(user=>user.user_id===userId);
   if(!member)return;
   const assignments=state.teamMembers.filter(a=>a.user_id===userId);
   const projectCount=new Set(assignments.map(a=>a.project_id)).size;
@@ -986,7 +1052,7 @@ function memberDetailsModal(userId){
     const team=state.teams.find(t=>t.id===a.team_id);
     return `<div class="member-assignment"><div><strong>${esc(a.project.name)}</strong><small>${esc(team?.name||"Team")}</small></div><span>${esc(a.designation)}</span></div>`;
   }).join(""):`<div class="member-assignments-empty"><strong>No project assignments yet</strong><p>This member has not been allocated to a team and project.</p></div>`;
-  modal(`<div class="member-detail-head"><b class="avatar">${esc(member.user.name.slice(0,2).toUpperCase())}</b><div><h2>${esc(member.user.name)}</h2><p>${esc(member.user.email)}</p></div></div><div class="member-detail-summary"><div><strong>${projectCount}</strong><span>Project${projectCount===1?"":"s"}</span></div><div><strong>${assignments.length}</strong><span>Assignment${assignments.length===1?"":"s"}</span></div><div><strong>${pretty(member.role)}</strong><span>Workspace role</span></div></div><h3 class="member-assignment-title">Project designations</h3><div class="member-assignment-list">${assignmentRows}</div>`);
+  modal(`<div class="member-detail-head">${avatar(member)}<div><h2>${esc(member.name)}</h2><p>${esc(member.email)}</p></div></div><div class="member-detail-summary"><div><strong>${projectCount}</strong><span>Project${projectCount===1?"":"s"}</span></div><div><strong>${assignments.length}</strong><span>Assignment${assignments.length===1?"":"s"}</span></div><div><strong>${member.role?pretty(member.role):"Registered"}</strong><span>This workspace</span></div></div><h3 class="member-assignment-title">Project designations</h3><div class="member-assignment-list">${assignmentRows}</div>`);
 }
 
 function memberProfessionalModal(member){
@@ -1001,10 +1067,10 @@ function memberProfessionalModal(member){
 }
 
 function teamAllocationModal(teamId){
-  const eligible=state.members;
+  const eligible=state.userDirectory.filter(user=>user.is_active);
   if(!eligible.length||!state.projects.length){toast("Add a member and create a project first",true);return}
   if(!state.designations.length){toast("Add a designation before allocating members",true);designationModal();return}
-  modal(formShell("Allocate team member","Choose their project and designation.",`${selectField("user_id","Member",eligible.map(m=>[m.user_id,m.user.name]))}${selectField("project_id","Project",state.projects.map(p=>[p.id,p.name]))}${selectField("designation","Designation",state.designations.map(item=>[item.name,item.name]))}`,"Allocate member"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
+  modal(formShell("Allocate team member","Choose a global member, project and designation for this workspace.",`${selectField("user_id","Member",eligible.map(user=>[user.user_id,user.name]))}${selectField("project_id","Project",state.projects.map(p=>[p.id,p.name]))}${selectField("designation","Designation",state.designations.map(item=>[item.name,item.name]))}`,"Allocate member"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
     data.user_id=Number(data.user_id);data.project_id=Number(data.project_id);
     const allocation=await api(`/workspaces/${state.workspace.id}/teams/${teamId}/members`,{method:"POST",body:JSON.stringify(data)});state.teamMembers.push(allocation);toast("Member allocated to project");
   }));
@@ -1039,6 +1105,7 @@ function departmentModal(department=null){
 function bindAccessControls(){
   $$('[data-member-details]').forEach(button=>button.onclick=()=>memberDetailsModal(Number(button.dataset.memberDetails)));
   if(!isAdmin())return;
+  $$("[data-global-member-profile]").forEach(button=>button.onclick=()=>adminUserProfileModal(state.userDirectory.find(user=>user.user_id===Number(button.dataset.globalMemberProfile))));
   $$('[data-remove-allocation]').forEach(remove=>{
     if(remove.previousElementSibling?.matches('[data-edit-allocation]'))return;
     const edit=document.createElement('button');
