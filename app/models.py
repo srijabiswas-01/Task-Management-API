@@ -70,6 +70,9 @@ class User(TimestampMixin, Base):
     profile: Mapped["UserProfile | None"] = relationship(
         back_populates="user", cascade="all, delete-orphan", uselist=False
     )
+    notifications: Mapped[list["Notification"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
     @property
     def profile_image(self) -> str | None:
@@ -185,10 +188,21 @@ class Department(TimestampMixin, Base):
 
 class GlobalDesignation(TimestampMixin, Base):
     __tablename__ = "global_designations"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_global_designation_name"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    department_id: Mapped[int | None] = mapped_column(
+        ForeignKey("global_departments.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120), index=True)
     description: Mapped[str | None] = mapped_column(Text)
+    department: Mapped["GlobalDepartment | None"] = relationship(back_populates="designations")
+
+    @property
+    def department_name(self) -> str | None:
+        return self.department.name if self.department else None
 
 
 class GlobalDepartment(TimestampMixin, Base):
@@ -197,6 +211,9 @@ class GlobalDepartment(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     description: Mapped[str | None] = mapped_column(Text)
+    designations: Mapped[list["GlobalDesignation"]] = relationship(
+        back_populates="department", cascade="all, delete-orphan"
+    )
 
 
 class Team(TimestampMixin, Base):
@@ -265,6 +282,8 @@ class TeamMember(TimestampMixin, Base):
         ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
     designation: Mapped[str] = mapped_column(String(120))
+    allocation_percent: Mapped[int] = mapped_column(Integer, default=100)
+    weekly_capacity_hours: Mapped[int] = mapped_column(Integer, default=40)
 
     team: Mapped["Team"] = relationship(back_populates="members")
     user: Mapped["User"] = relationship()
@@ -287,6 +306,7 @@ class Project(TimestampMixin, Base):
         SqlEnum(Priority), default=Priority.medium
     )
     budget: Mapped[int | None] = mapped_column(Integer)
+    contingency_percent: Mapped[int] = mapped_column(Integer, default=15)
     deadline: Mapped[date | None] = mapped_column(Date)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -339,6 +359,9 @@ class Task(TimestampMixin, Base):
     assignee_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     reporter_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     story_points: Mapped[int | None] = mapped_column(Integer)
+    estimated_hours: Mapped[int | None] = mapped_column(Integer)
+    planned_budget: Mapped[int | None] = mapped_column(Integer)
+    actual_cost: Mapped[int | None] = mapped_column(Integer)
     start_date: Mapped[date | None] = mapped_column(Date)
     due_date: Mapped[date | None] = mapped_column(Date)
     progress: Mapped[int] = mapped_column(Integer, default=0)
@@ -517,3 +540,55 @@ class ChecklistAction(TimestampMixin, Base):
     action: Mapped[str] = mapped_column(String(30))
 
     item: Mapped["ChecklistItem"] = relationship(back_populates="actions")
+
+
+class Notification(TimestampMixin, Base):
+    __tablename__ = "notifications"
+    __table_args__ = (
+        UniqueConstraint("user_id", "task_id", "kind", name="uq_user_task_notification"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(40), default="task_deadline")
+    severity: Mapped[str] = mapped_column(String(20), default="critical")
+    title: Mapped[str] = mapped_column(String(220))
+    message: Mapped[str] = mapped_column(Text)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    user: Mapped["User"] = relationship(back_populates="notifications")
+
+
+class ProfileCompletionReminder(TimestampMixin, Base):
+    __tablename__ = "profile_completion_reminders"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "user_id", name="uq_workspace_profile_reminder"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    sent_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    title: Mapped[str] = mapped_column(String(220), default="Complete your profile")
+    message: Mapped[str] = mapped_column(Text)
+    completion_percent: Mapped[int] = mapped_column(Integer, default=0)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_resolved: Mapped[bool] = mapped_column(Boolean, default=False)

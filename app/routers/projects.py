@@ -1,5 +1,7 @@
+from datetime import date
+
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.dependencies import (
     CurrentUser,
@@ -8,7 +10,7 @@ from app.dependencies import (
     require_workspace_admin,
     require_workspace_member,
 )
-from app.models import Project, ProjectBoard, Sprint, Task, TeamMember, WorkspaceMember, WorkspaceRole
+from app.models import Project, ProjectBoard, Sprint, Task, TaskStatus, TeamMember, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     ProjectCreate,
     ProjectRead,
@@ -106,6 +108,52 @@ def get_project(project_id: int, db: DB, current_user: CurrentUser) -> Project:
     return accessible_project(db, project_id, current_user.id)
 
 
+@router.get("/projects/{project_id}/report")
+def project_report(project_id: int, db: DB, current_user: CurrentUser) -> dict:
+    """Shared read-only delivery report for project admins and allocated members."""
+    project = accessible_project(db, project_id, current_user.id)
+    tasks = list(db.scalars(select(Task).where(Task.project_id == project.id)).all())
+    allocations = list(db.scalars(select(TeamMember).where(TeamMember.project_id == project.id)).all())
+    today = date.today()
+    total = len(tasks)
+    completed = sum(task.status == TaskStatus.done for task in tasks)
+    progress = round(sum(task.progress for task in tasks) / total) if total else 0
+    overdue = [task for task in tasks if task.due_date and task.due_date < today and task.status != TaskStatus.done]
+    scheduled = [task for task in tasks if task.start_date and task.due_date]
+    status_counts = {status.value: sum(task.status == status for task in tasks) for status in TaskStatus}
+    priority_counts = {priority: sum(task.priority.value == priority for task in tasks) for priority in ("low", "medium", "high", "critical")}
+    total_points = sum(task.story_points or 0 for task in tasks)
+    completed_points = sum(task.story_points or 0 for task in tasks if task.status == TaskStatus.done)
+
+    # There are no task-dependency fields in the current data model. This is a
+    # transparent schedule-risk path: unfinished high-priority tasks, ordered by
+    # their planned end date, rather than a fabricated dependency calculation.
+    critical_path = sorted(
+        (task for task in scheduled if task.status != TaskStatus.done and task.priority.value in {"high", "critical"}),
+        key=lambda task: (task.due_date, task.start_date),
+    )[:8]
+    team_members = sorted({allocation.user_id for allocation in allocations})
+    planned_days = max(1, (project.end_date - project.start_date).days + 1)
+    elapsed_days = min(planned_days, max(0, (today - project.start_date).days + 1))
+    schedule_percent = round(elapsed_days * 100 / planned_days)
+    health = "On track"
+    if overdue or (schedule_percent > progress + 15 and total):
+        health = "At risk"
+    if project.end_date < today and completed < total:
+        health = "Delayed"
+    return {
+        "project": {"id": project.id, "name": project.name, "status": project.status.value, "priority": project.priority.value, "start_date": project.start_date, "end_date": project.end_date, "budget": project.budget},
+        "health": health,
+        "progress": progress,
+        "schedule_percent": schedule_percent,
+        "tasks": {"total": total, "completed": completed, "overdue": len(overdue), "scheduled": len(scheduled), "status_counts": status_counts, "priority_counts": priority_counts},
+        "budget": {"planned": project.budget, "cost_tracking_available": False, "story_points": total_points, "completed_story_points": completed_points},
+        "team": {"allocated_members": len(team_members), "allocations": len(allocations)},
+        "critical_path": [{"id": task.id, "title": task.title, "priority": task.priority.value, "status": task.status.value, "start_date": task.start_date, "due_date": task.due_date, "progress": task.progress} for task in critical_path],
+        "workflow": status_counts,
+    }
+
+
 @router.patch("/projects/{project_id}", response_model=ProjectRead)
 def update_project(
     project_id: int,
@@ -157,7 +205,10 @@ def delete_project(
 ) -> None:
     project = accessible_project(db, project_id, current_user.id)
     require_project_admin(db, project.id, current_user.id)
-    db.delete(project)
+    # Let database foreign-key cascades remove dependent data in one operation.
+    # This avoids loading every task, sprint, comment, and board row into Python
+    # before a project can be deleted.
+    db.execute(delete(Project).where(Project.id == project.id))
     db.commit()
 
 

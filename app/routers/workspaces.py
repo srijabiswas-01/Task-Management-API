@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.dependencies import (
@@ -10,6 +12,7 @@ from app.dependencies import (
     require_team_admin,
 )
 from app.core.skills import normalize_skills, parse_skills
+from app.core.profile import profile_completion
 from app.models import Comment, Department, Designation, GlobalDepartment, GlobalDesignation, Project, Task, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     MemberAdd,
@@ -34,11 +37,45 @@ from app.schemas import (
     UserProfileUpdate,
     SkillMemberRead,
     WorkspaceCreate,
+    WorkspaceDeleteConfirm,
     WorkspaceRead,
     WorkspaceUpdate,
 )
 
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
+
+
+def commit_catalog_change(db: DB, duplicate_message: str) -> None:
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=duplicate_message) from error
+
+
+def validate_profile_catalog(
+    db: DB, designation_name: str | None, department_name: str | None
+) -> None:
+    if department_name and db.scalar(select(GlobalDepartment.id).where(
+        GlobalDepartment.name == department_name
+    )) is None:
+        raise HTTPException(status_code=400, detail="Select a valid department")
+    if designation_name:
+        if not department_name:
+            raise HTTPException(status_code=400, detail="A designation requires a department")
+        valid = db.scalar(
+            select(GlobalDesignation.id)
+            .join(GlobalDepartment, GlobalDepartment.id == GlobalDesignation.department_id)
+            .where(
+                GlobalDesignation.name == designation_name,
+                GlobalDepartment.name == department_name,
+            )
+        )
+        if valid is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Select a designation that belongs to the selected department",
+            )
 
 
 def validate_team_manager(
@@ -86,10 +123,10 @@ def create_department(
 ) -> GlobalDepartment:
     require_workspace_admin(db, workspace_id, current_user.id)
     name = payload.name.strip()
-    if db.scalar(select(GlobalDepartment.id).where(GlobalDepartment.name == name)):
+    if db.scalar(select(GlobalDepartment.id).where(func.lower(GlobalDepartment.name) == name.casefold())):
         raise HTTPException(status_code=409, detail="Department already exists")
     department = GlobalDepartment(name=name, description=payload.description)
-    db.add(department); db.commit(); db.refresh(department)
+    db.add(department);commit_catalog_change(db, "Department already exists");db.refresh(department)
     return department
 
 
@@ -107,7 +144,7 @@ def update_department(
     if values.get("name") is not None:
         values["name"] = values["name"].strip()
         if db.scalar(select(GlobalDepartment.id).where(
-            GlobalDepartment.name == values["name"], GlobalDepartment.id != department_id
+            func.lower(GlobalDepartment.name) == values["name"].casefold(), GlobalDepartment.id != department_id
         )):
             raise HTTPException(status_code=409, detail="Department already exists")
     for field, value in values.items(): setattr(department, field, value)
@@ -115,7 +152,7 @@ def update_department(
     if new_name != old_name:
         for profile in db.scalars(select(UserProfile).where(UserProfile.department == old_name)).all():
             profile.department = new_name
-    db.commit(); db.refresh(department)
+    commit_catalog_change(db, "Department already exists");db.refresh(department)
     return department
 
 
@@ -127,13 +164,36 @@ def delete_department(
     department = db.get(GlobalDepartment, department_id)
     if department is None:
         raise HTTPException(status_code=404, detail="Department not found")
-    db.delete(department); db.commit()
+    designation_names = list(db.scalars(select(GlobalDesignation.name).where(
+        GlobalDesignation.department_id == department.id
+    )).all())
+    for profile in db.scalars(select(UserProfile).where(
+        (UserProfile.department == department.name) |
+        (UserProfile.professional_title.in_(designation_names) if designation_names else False)
+    )).all():
+        if profile.department == department.name:
+            profile.department = None
+        if profile.professional_title in designation_names:
+            profile.professional_title = None
+    if designation_names:
+        for allocation in db.scalars(select(TeamMember).where(
+            TeamMember.designation.in_(designation_names)
+        )).all():
+            allocation.designation = ""
+        for manager in db.scalars(select(TeamManager).where(
+            TeamManager.designation.in_(designation_names)
+        )).all():
+            manager.designation = ""
+    db.delete(department)
+    db.commit()
 
 
 @router.get("/{workspace_id}/designations", response_model=list[DesignationRead])
 def list_designations(workspace_id: int, db: DB, current_user: CurrentUser) -> list[GlobalDesignation]:
     require_workspace_member(db, workspace_id, current_user.id)
-    return list(db.scalars(select(GlobalDesignation).order_by(GlobalDesignation.name)).all())
+    return list(db.scalars(select(GlobalDesignation).options(
+        selectinload(GlobalDesignation.department)
+    ).order_by(GlobalDesignation.name)).all())
 
 
 @router.post("/{workspace_id}/designations", response_model=DesignationRead, status_code=201)
@@ -142,11 +202,18 @@ def create_designation(
 ) -> GlobalDesignation:
     require_workspace_admin(db, workspace_id, current_user.id)
     name = payload.name.strip()
-    exists = db.scalar(select(GlobalDesignation).where(GlobalDesignation.name == name))
+    department = db.get(GlobalDepartment, payload.department_id)
+    if department is None:
+        raise HTTPException(status_code=400, detail="Select a valid department")
+    exists = db.scalar(select(GlobalDesignation).where(
+        func.lower(GlobalDesignation.name) == name.casefold()
+    ))
     if exists:
         raise HTTPException(status_code=409, detail="Designation already exists")
-    designation = GlobalDesignation(name=name, description=payload.description)
-    db.add(designation); db.commit(); db.refresh(designation)
+    designation = GlobalDesignation(
+        name=name, description=payload.description, department_id=department.id
+    )
+    db.add(designation);commit_catalog_change(db, "Designation already exists");db.refresh(designation)
     return designation
 
 
@@ -161,10 +228,13 @@ def update_designation(
         raise HTTPException(status_code=404, detail="Designation not found")
     values = payload.model_dump(exclude_unset=True)
     old_name = designation.name
+    if "department_id" in values:
+        if values["department_id"] is None or db.get(GlobalDepartment, values["department_id"]) is None:
+            raise HTTPException(status_code=400, detail="Select a valid department")
     if values.get("name") is not None:
         values["name"] = values["name"].strip()
         duplicate = db.scalar(select(GlobalDesignation.id).where(
-            GlobalDesignation.name == values["name"], GlobalDesignation.id != designation_id
+            func.lower(GlobalDesignation.name) == values["name"].casefold(), GlobalDesignation.id != designation_id
         ))
         if duplicate:
             raise HTTPException(status_code=409, detail="Designation already exists")
@@ -183,7 +253,7 @@ def update_designation(
             UserProfile.professional_title == old_name,
         )).all()
         for profile in profiles: profile.professional_title = designation.name
-    db.commit(); db.refresh(designation)
+    commit_catalog_change(db, "Designation already exists");db.refresh(designation)
     return designation
 
 
@@ -195,7 +265,20 @@ def delete_designation(
     designation = db.get(GlobalDesignation, designation_id)
     if designation is None:
         raise HTTPException(status_code=404, detail="Designation not found")
-    db.delete(designation); db.commit()
+    for allocation in db.scalars(select(TeamMember).where(
+        TeamMember.designation == designation.name
+    )).all():
+        allocation.designation = ""
+    for manager in db.scalars(select(TeamManager).where(
+        TeamManager.designation == designation.name
+    )).all():
+        manager.designation = ""
+    for profile in db.scalars(select(UserProfile).where(
+        UserProfile.professional_title == designation.name
+    )).all():
+        profile.professional_title = None
+    db.delete(designation)
+    db.commit()
 
 
 @router.post("", response_model=WorkspaceRead, status_code=201)
@@ -257,7 +340,10 @@ def list_workspaces(db: DB, current_user: CurrentUser) -> list[WorkspaceRead]:
 
 @router.delete("/{workspace_id}", status_code=204)
 def delete_workspace(
-    workspace_id: int, db: DB, current_user: CurrentUser
+    workspace_id: int,
+    payload: WorkspaceDeleteConfirm,
+    db: DB,
+    current_user: CurrentUser,
 ) -> None:
     workspace = db.get(Workspace, workspace_id)
     if workspace is None:
@@ -266,6 +352,11 @@ def delete_workspace(
         raise HTTPException(
             status_code=403,
             detail="Only the workspace owner can delete this workspace",
+        )
+    if payload.workspace_name != workspace.name:
+        raise HTTPException(
+            status_code=400,
+            detail="Workspace name confirmation does not match",
         )
     db.delete(workspace)
     db.commit()
@@ -417,6 +508,8 @@ def user_directory(
         department=user.profile.department if user.profile else None,
         profile_image=user.profile.profile_image if user.profile else None,
         projects=sorted(set(projects_by_user.get(user.id, []))),
+        completion_percent=profile_completion(user, user.profile)[0],
+        missing_fields=profile_completion(user, user.profile)[1],
     ) for user in users]
 
 
@@ -542,6 +635,7 @@ def update_member_professional_profile(
         GlobalDepartment.name == payload.department,
     )) is None:
         raise HTTPException(status_code=400, detail="Select a valid department")
+    validate_profile_catalog(db, payload.professional_title, payload.department)
     profile = member.user.profile
     if profile is None:
         profile = UserProfile(user_id=member.user_id)
@@ -560,6 +654,7 @@ def admin_profile_response(db: DB, user: User) -> UserProfileRead:
     ).all()
     managed = db.scalars(select(Project.name).where(Project.project_manager_id == user.id)).all()
     projects = sorted(set(allocated) | set(managed))
+    completion_percent, missing_fields = profile_completion(user, profile)
     return UserProfileRead(
         name=user.name, email=user.email, project_count=len(projects), projects=projects,
         profile_image=profile.profile_image if profile else None,
@@ -570,6 +665,7 @@ def admin_profile_response(db: DB, user: User) -> UserProfileRead:
         years_experience=profile.years_experience if profile else None,
         skills=profile.skills if profile else None,
         achievements=profile.achievements if profile else None,
+        completion_percent=completion_percent, missing_fields=missing_fields,
     )
 
 
@@ -584,6 +680,7 @@ def update_admin_managed_profile(
         GlobalDepartment.name == payload.department,
     )) is None:
         raise HTTPException(status_code=400, detail="Select a valid department")
+    validate_profile_catalog(db, payload.professional_title, payload.department)
     user.name = payload.name.strip()
     profile = db.scalar(select(UserProfile).where(UserProfile.user_id == user.id))
     if profile is None:
@@ -652,6 +749,7 @@ def update_member_profile(
         GlobalDepartment.name == payload.department,
     )) is None:
         raise HTTPException(status_code=400, detail="Select a valid department")
+    validate_profile_catalog(db, payload.professional_title, payload.department)
     user = db.get(User, member.user_id)
     user.name = payload.name.strip()
     profile = db.scalar(select(UserProfile).where(UserProfile.user_id == user.id))
@@ -848,7 +946,7 @@ def allocate_team_member(
     team = require_team_admin(db, team_id, current_user.id)
     if team.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Team not found")
-    user = db.scalar(select(User).where(
+    user = db.scalar(select(User).options(selectinload(User.profile)).where(
         User.id == payload.user_id, User.is_active.is_(True)
     ))
     project = db.scalar(
@@ -859,6 +957,15 @@ def allocate_team_member(
     )
     if user is None or project is None:
         raise HTTPException(status_code=400, detail="Invalid member or project")
+    completion_percent, missing_fields = profile_completion(user, user.profile)
+    if completion_percent < 100:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Profile is {completion_percent}% complete. Complete these details before "
+                f"team allocation: {', '.join(missing_fields)}"
+            ),
+        )
     ensure_workspace_access(db, workspace_id, payload.user_id)
     designation = db.scalar(select(GlobalDesignation).where(
         GlobalDesignation.name == payload.designation.strip(),

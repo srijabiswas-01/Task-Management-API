@@ -19,6 +19,36 @@ def test_ai_plan_preview_and_confirmation_create_board_tasks(
         f"/projects/{project_id}/board",
         headers=auth_headers,
     ).json()
+    current_user = client.get("/auth/me", headers=auth_headers).json()
+    department = client.post(
+        f"/workspaces/{workspace_id}/departments",
+        json={"name": "Delivery"}, headers=auth_headers,
+    ).json()
+    client.post(
+        f"/workspaces/{workspace_id}/designations",
+        json={"name": "Delivery Lead", "department_id": department["id"]}, headers=auth_headers,
+    )
+    completed_profile = client.put(
+        f"/workspaces/{workspace_id}/users/{current_user['id']}/profile",
+        json={
+            "name": current_user["name"], "profile_image": "data:image/png;base64,dGVzdA==",
+            "phone": "555-0100", "location": "Remote", "bio": "Delivery lead",
+            "professional_title": "Delivery Lead", "department": "Delivery",
+            "years_experience": 5, "skills": "Planning", "achievements": "Shipped products",
+        },
+        headers=auth_headers,
+    )
+    assert completed_profile.json()["completion_percent"] == 100
+    team = client.post(
+        f"/workspaces/{workspace_id}/teams",
+        json={"name": "Delivery", "manager_user_id": current_user["id"], "manager_designation": "Delivery Lead"},
+        headers=auth_headers,
+    ).json()
+    client.post(
+        f"/workspaces/{workspace_id}/teams/{team['id']}/members",
+        json={"user_id": current_user["id"], "project_id": project_id, "designation": "Delivery Lead"},
+        headers=auth_headers,
+    )
 
     generated = AIGeneratedPlan(
         summary="A practical mobile delivery plan",
@@ -52,8 +82,9 @@ def test_ai_plan_preview_and_confirmation_create_board_tasks(
     preview = client.post(
         f"/projects/{project_id}/ai/task-plan",
         json={
-            "prompt": "Build a secure mobile application for customers",
-            "maximum_tasks": 10,
+                "prompt": "Build a secure mobile application for customers",
+                "maximum_tasks": 10,
+                "team_id": team["id"],
         },
         headers=auth_headers,
     )

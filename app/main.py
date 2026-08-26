@@ -8,13 +8,13 @@ from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import inspect, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.database import Base, engine
 from app.models import Department, Designation, GlobalDepartment, GlobalDesignation
-from app.routers import ai, auth, boards, projects, tasks, workspaces
+from app.routers import ai, auth, boards, notifications, projects, tasks, workspaces
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,9 @@ async def lifespan(_: FastAPI):
                 f"ALTER TABLE workspace_members ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT {default}"
             ))
     project_columns = {column["name"] for column in inspect(engine).get_columns("projects")}
+    task_columns = {column["name"] for column in inspect(engine).get_columns("tasks")}
+    team_member_columns = {column["name"] for column in inspect(engine).get_columns("team_members")}
+    designation_columns = {column["name"] for column in inspect(engine).get_columns("global_designations")}
     with engine.begin() as connection:
         if "start_date" not in project_columns:
             connection.execute(text("ALTER TABLE projects ADD COLUMN start_date DATE"))
@@ -44,6 +47,30 @@ async def lifespan(_: FastAPI):
             "UPDATE projects SET end_date = CASE "
             "WHEN deadline IS NOT NULL AND deadline >= start_date THEN deadline "
             "ELSE start_date END WHERE end_date IS NULL"
+        ))
+        compatibility_columns = (
+            ("projects", project_columns, "contingency_percent", "INTEGER NOT NULL DEFAULT 15"),
+            ("tasks", task_columns, "estimated_hours", "INTEGER"),
+            ("tasks", task_columns, "planned_budget", "INTEGER"),
+            ("tasks", task_columns, "actual_cost", "INTEGER"),
+            ("team_members", team_member_columns, "allocation_percent", "INTEGER NOT NULL DEFAULT 100"),
+            ("team_members", team_member_columns, "weekly_capacity_hours", "INTEGER NOT NULL DEFAULT 40"),
+        )
+        for table, columns, column, definition in compatibility_columns:
+            if column not in columns:
+                connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
+        if "department_id" not in designation_columns:
+            connection.execute(text(
+                "ALTER TABLE global_designations ADD COLUMN department_id INTEGER "
+                "REFERENCES global_departments(id) ON DELETE CASCADE"
+            ))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_global_department_name_ci "
+            "ON global_departments (lower(name))"
+        ))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_global_designation_name_ci "
+            "ON global_designations (lower(name))"
         ))
     with Session(engine) as db:
         global_designations = {
@@ -90,12 +117,23 @@ async def database_unavailable(_, __: OperationalError) -> JSONResponse:
         headers={"Retry-After": "2"},
     )
 
+
+@app.exception_handler(IntegrityError)
+async def integrity_conflict(_, __: IntegrityError) -> JSONResponse:
+    # Database constraints are the final authority during concurrent writes.
+    # Keep internal table/statement details out of the public response.
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "This change conflicts with an existing record"},
+    )
+
 app.include_router(auth.router)
 app.include_router(workspaces.router)
 app.include_router(projects.router)
 app.include_router(tasks.router)
 app.include_router(boards.router)
 app.include_router(ai.router)
+app.include_router(notifications.router)
 
 frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 app.mount("/static", StaticFiles(directory=frontend_dir), name="static")

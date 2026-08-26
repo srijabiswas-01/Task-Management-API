@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 from fastapi.testclient import TestClient
 
 
@@ -243,10 +245,25 @@ def test_global_member_directory_survives_workspace_team_and_allocation_deletion
         ).json()
         assert "global@example.com" in {user["email"] for user in directory}
 
+    department = client.post(
+        f"/workspaces/{first['id']}/departments",
+        json={"name": "Engineering"}, headers=auth_headers,
+    ).json()
     client.post(
         f"/workspaces/{first['id']}/designations",
-        json={"name": "Developer"}, headers=auth_headers,
+        json={"name": "Developer", "department_id": department["id"]}, headers=auth_headers,
     )
+    completed_profile = client.put(
+        f"/workspaces/{first['id']}/users/{registered['id']}/profile",
+        json={
+            "name": "Global Member", "profile_image": "data:image/png;base64,dGVzdA==",
+            "phone": "555-0101", "location": "Remote", "bio": "Developer profile",
+            "professional_title": "Developer", "department": "Engineering",
+            "years_experience": 3, "skills": "Python", "achievements": "Completed training",
+        },
+        headers=auth_headers,
+    )
+    assert completed_profile.json()["completion_percent"] == 100
     project = client.post(
         f"/workspaces/{first['id']}/projects",
         json={"name": "Scoped project", "start_date": "2026-08-01", "end_date": "2026-12-31"},
@@ -281,7 +298,7 @@ def test_global_member_directory_survives_workspace_team_and_allocation_deletion
             f"/workspaces/{first['id']}/user-directory", headers=auth_headers
         ).json()
     }
-    assert client.delete(f"/workspaces/{first['id']}", headers=auth_headers).status_code == 204
+    assert client.request("DELETE", f"/workspaces/{first['id']}", json={"workspace_name": first["name"]}, headers=auth_headers).status_code == 204
     assert "global@example.com" in {
         user["email"] for user in client.get(
             f"/workspaces/{second['id']}/user-directory", headers=auth_headers
@@ -298,13 +315,13 @@ def test_designations_and_departments_are_shared_by_every_workspace(
     second = client.post(
         "/workspaces", json={"name": "Shared catalog two"}, headers=auth_headers
     ).json()
-    designation = client.post(
-        f"/workspaces/{first['id']}/designations",
-        json={"name": "Product Designer"}, headers=auth_headers,
-    ).json()
     department = client.post(
         f"/workspaces/{first['id']}/departments",
         json={"name": "Design"}, headers=auth_headers,
+    ).json()
+    designation = client.post(
+        f"/workspaces/{first['id']}/designations",
+        json={"name": "Product Designer", "department_id": department["id"]}, headers=auth_headers,
     ).json()
     assert [item["name"] for item in client.get(
         f"/workspaces/{second['id']}/designations", headers=auth_headers
@@ -331,8 +348,8 @@ def test_designations_and_departments_are_shared_by_every_workspace(
         f"/workspaces/{third['id']}/departments", headers=auth_headers
     ).json()] == ["Product Design"]
     for workspace in (first, second, third):
-        assert client.delete(
-            f"/workspaces/{workspace['id']}", headers=auth_headers
+        assert client.request(
+            "DELETE", f"/workspaces/{workspace['id']}", json={"workspace_name": workspace["name"]}, headers=auth_headers
         ).status_code == 204
     recreated = client.post(
         "/workspaces", json={"name": "Catalog after deletion"}, headers=auth_headers
@@ -570,8 +587,24 @@ def test_workspace_owner_can_delete_workspace_and_all_children(
     assert project_update.status_code == 200
     assert project_update.json()["priority"] == "critical"
 
-    deleted = client.delete(
+    missing_confirmation = client.delete(
         f"/workspaces/{workspace_id}",
+        headers=auth_headers,
+    )
+    assert missing_confirmation.status_code == 422
+    wrong_confirmation = client.request(
+        "DELETE",
+        f"/workspaces/{workspace_id}",
+        json={"workspace_name": "Temporary Workspace"},
+        headers=auth_headers,
+    )
+    assert wrong_confirmation.status_code == 400
+    assert wrong_confirmation.json()["detail"] == "Workspace name confirmation does not match"
+
+    deleted = client.request(
+        "DELETE",
+        f"/workspaces/{workspace_id}",
+        json={"workspace_name": "Renamed Workspace"},
         headers=auth_headers,
     )
     assert deleted.status_code == 204
@@ -580,6 +613,60 @@ def test_workspace_owner_can_delete_workspace_and_all_children(
         client.get(f"/projects/{project_id}", headers=auth_headers).status_code
         == 404
     )
+
+
+def test_assigned_member_gets_persistent_critical_deadline_notification(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    today = date.today()
+    me_id = client.get("/auth/me", headers=auth_headers).json()["id"]
+    workspace = client.post(
+        "/workspaces",
+        json={"name": "Reminder workspace"},
+        headers=auth_headers,
+    ).json()
+    project = client.post(
+        f"/workspaces/{workspace['id']}/projects",
+        json={"name": "Reminder project", "start_date": str(today - timedelta(days=30)), "end_date": str(today + timedelta(days=365))},
+        headers=auth_headers,
+    ).json()
+    task = client.post(
+        f"/projects/{project['id']}/tasks",
+        json={
+            "title": "Finish release checklist",
+            "assignee_ids": [me_id],
+            "due_date": str(today),
+        },
+        headers=auth_headers,
+    ).json()
+    client.post(
+        f"/tasks/{task['id']}/checklist",
+        json={"text": "Run final verification"},
+        headers=auth_headers,
+    )
+
+    notifications = client.get("/notifications", headers=auth_headers)
+    assert notifications.status_code == 200
+    body = notifications.json()
+    assert body["unread_count"] == 1
+    assert body["critical_count"] == 1
+    reminder = body["items"][0]
+    assert reminder["task_id"] == task["id"]
+    assert reminder["severity"] == "critical"
+    assert "checklist" in reminder["message"].lower()
+
+    cannot_silently_read = client.patch(
+        f"/notifications/{reminder['id']}/read", headers=auth_headers
+    )
+    assert cannot_silently_read.status_code == 400
+    acknowledged = client.patch(
+        f"/notifications/{reminder['id']}/acknowledge", headers=auth_headers
+    )
+    assert acknowledged.status_code == 200
+    assert acknowledged.json()["is_acknowledged"] is True
+    refreshed = client.get("/notifications", headers=auth_headers).json()
+    assert refreshed["unread_count"] == 0
+    assert refreshed["critical_count"] == 0
 
 
 def test_workspace_admin_can_delete_project_and_all_children(
@@ -795,13 +882,28 @@ def test_team_allocation_controls_member_collaboration_access(
         json={"name": "Internal admin", "start_date": "2026-08-01", "end_date": "2026-12-31"},
         headers=auth_headers,
     ).json()
+    mobile_department = client.post(
+        f"/workspaces/{workspace_id}/departments",
+        json={"name": "Mobile Engineering"}, headers=auth_headers,
+    ).json()
     designation = client.post(
         f"/workspaces/{workspace_id}/designations",
-        json={"name": "Android Developer", "description": "Builds Android apps"},
+        json={"name": "Android Developer", "description": "Builds Android apps", "department_id": mobile_department["id"]},
         headers=auth_headers,
     )
     assert designation.status_code == 201
     designation = designation.json()
+    completed_profile = client.put(
+        f"/workspaces/{workspace_id}/users/{teammate['id']}/profile",
+        json={
+            "name": "Mobile Developer", "profile_image": "data:image/png;base64,dGVzdA==",
+            "phone": "555-0102", "location": "Remote", "bio": "Mobile specialist",
+            "professional_title": "Android Developer", "department": "Mobile Engineering",
+            "years_experience": 4, "skills": "Android, Kotlin", "achievements": "Published an app",
+        },
+        headers=auth_headers,
+    )
+    assert completed_profile.json()["completion_percent"] == 100
     team = client.post(
         f"/workspaces/{workspace_id}/teams",
         json={
@@ -1008,11 +1110,6 @@ def test_current_user_profile_and_project_history(
         headers=auth_headers,
     ).json()
     assert project["project_manager_id"] is not None
-    client.post(
-        f"/workspaces/{workspace_id}/designations",
-        json={"name": "Project Lead"},
-        headers=auth_headers,
-    )
     department = client.post(
         f"/workspaces/{workspace_id}/departments",
         json={"name": "Engineering", "description": "Builds the product"},
@@ -1020,6 +1117,16 @@ def test_current_user_profile_and_project_history(
     )
     assert department.status_code == 201
     department = department.json()
+    designation = client.post(
+        f"/workspaces/{workspace_id}/designations",
+        json={"name": "Project Lead", "department_id": department["id"]},
+        headers=auth_headers,
+    ).json()
+    assert client.post(
+        f"/workspaces/{workspace_id}/designations",
+        json={"name": "project lead", "department_id": department["id"]},
+        headers=auth_headers,
+    ).status_code == 409
     current_member = client.get(
         f"/workspaces/{workspace_id}/members", headers=auth_headers
     ).json()[0]
@@ -1062,7 +1169,91 @@ def test_current_user_profile_and_project_history(
     )
     assert renamed.status_code == 200
     assert client.get("/auth/profile", headers=auth_headers).json()["department"] == "IT"
+    assert client.post(
+        f"/workspaces/{workspace_id}/departments",
+        json={"name": "it"}, headers=auth_headers,
+    ).status_code == 409
     assert client.delete(
         f"/workspaces/{workspace_id}/departments/{department['id']}",
         headers=auth_headers,
     ).status_code == 204
+    cleared_profile = client.get("/auth/profile", headers=auth_headers).json()
+    assert cleared_profile["department"] is None
+    assert cleared_profile["professional_title"] is None
+    assert designation["id"] not in {
+        item["id"] for item in client.get(
+            f"/workspaces/{workspace_id}/designations", headers=auth_headers
+        ).json()
+    }
+
+
+def test_incomplete_profile_cannot_be_allocated_and_member_cannot_set_admin_fields(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    member = client.post(
+        "/auth/register",
+        json={"name": "Incomplete Member", "email": "incomplete@example.com", "password": "securepass123"},
+    ).json()
+    workspace = client.post(
+        "/workspaces", json={"name": "Profile rules"}, headers=auth_headers
+    ).json()
+    client.patch(
+        f"/workspaces/{workspace['id']}/users/{member['id']}/approve",
+        headers=auth_headers,
+    )
+    operations = client.post(
+        f"/workspaces/{workspace['id']}/departments",
+        json={"name": "Operations"}, headers=auth_headers,
+    ).json()
+    client.post(
+        f"/workspaces/{workspace['id']}/designations",
+        json={"name": "Analyst", "department_id": operations["id"]}, headers=auth_headers,
+    )
+    project = client.post(
+        f"/workspaces/{workspace['id']}/projects",
+        json={"name": "Profile project", "start_date": "2026-08-01", "end_date": "2026-12-31"},
+        headers=auth_headers,
+    ).json()
+    team = client.post(
+        f"/workspaces/{workspace['id']}/teams",
+        json={"name": "Profile team", "manager_user_id": member["id"], "manager_designation": "Analyst"},
+        headers=auth_headers,
+    ).json()
+    blocked = client.post(
+        f"/workspaces/{workspace['id']}/teams/{team['id']}/members",
+        json={"user_id": member["id"], "project_id": project["id"], "designation": "Analyst"},
+        headers=auth_headers,
+    )
+    assert blocked.status_code == 400
+    assert "Profile is 10% complete" in blocked.json()["detail"]
+
+    login = client.post(
+        "/auth/login", data={"username": "incomplete@example.com", "password": "securepass123"}
+    ).json()
+    member_headers = {"Authorization": f"Bearer {login['access_token']}"}
+    forbidden = client.put(
+        "/auth/profile",
+        json={"name": "Incomplete Member", "professional_title": "Analyst", "department": "Operations"},
+        headers=member_headers,
+    )
+    assert forbidden.status_code == 403
+    assert "Only an admin" in forbidden.json()["detail"]
+
+    sent = client.post(
+        f"/notifications/profile-completion/{workspace['id']}",
+        json={"user_ids": [member["id"]]},
+        headers=auth_headers,
+    )
+    assert sent.status_code == 200
+    assert sent.json()["sent_count"] == 1
+    member_notifications = client.get("/notifications", headers=member_headers).json()
+    assert member_notifications["unread_count"] == 1
+    reminder = member_notifications["items"][0]
+    assert reminder["kind"] == "profile_completion"
+    assert reminder["severity"] == "normal"
+    assert reminder["id"].startswith("profile-")
+    marked_read = client.patch(
+        f"/notifications/{reminder['id']}/read", headers=member_headers
+    )
+    assert marked_read.status_code == 200
+    assert marked_read.json()["is_read"] is True

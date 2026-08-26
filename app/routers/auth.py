@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 
 from app.core.security import create_access_token, hash_password, verify_password
 from app.core.skills import normalize_skills
+from app.core.profile import profile_completion
 from app.dependencies import CurrentUser, DB
 from app.models import GlobalDepartment, GlobalDesignation, Project, TeamMember, User, UserProfile
 from app.schemas import Token, UserProfileRead, UserProfileUpdate, UserRead, UserRegister
@@ -70,6 +71,7 @@ def profile_response(db: DB, user: User) -> UserProfileRead:
         select(Project.name).where(Project.project_manager_id == user.id)
     ).all()
     projects = sorted(set(allocated) | set(managed))
+    completion_percent, missing_fields = profile_completion(user, profile)
     return UserProfileRead(
         name=user.name, email=user.email, project_count=len(projects), projects=projects,
         profile_image=profile.profile_image if profile else None,
@@ -80,6 +82,7 @@ def profile_response(db: DB, user: User) -> UserProfileRead:
         years_experience=profile.years_experience if profile else None,
         skills=profile.skills if profile else None,
         achievements=profile.achievements if profile else None,
+        completion_percent=completion_percent, missing_fields=missing_fields,
     )
 
 
@@ -92,20 +95,16 @@ def get_profile(db: DB, current_user: CurrentUser) -> UserProfileRead:
 def update_profile(
     payload: UserProfileUpdate, db: DB, current_user: CurrentUser
 ) -> UserProfileRead:
-    if payload.professional_title and db.scalar(select(GlobalDesignation.id).where(
-        GlobalDesignation.name == payload.professional_title,
-    )) is None:
-        raise HTTPException(status_code=400, detail="Select a valid designation")
-    if payload.department and db.scalar(select(GlobalDepartment.id).where(
-        GlobalDepartment.name == payload.department,
-    )) is None:
-        raise HTTPException(status_code=400, detail="Select a valid department")
     current_user.name = payload.name.strip()
     profile = db.scalar(select(UserProfile).where(UserProfile.user_id == current_user.id))
     if profile is None:
         profile = UserProfile(user_id=current_user.id)
         db.add(profile)
-    for field, value in payload.model_dump(exclude={"name"}).items():
+    if "professional_title" in payload.model_fields_set and payload.professional_title != profile.professional_title:
+        raise HTTPException(status_code=403, detail="Only an admin can change your designation")
+    if "department" in payload.model_fields_set and payload.department != profile.department:
+        raise HTTPException(status_code=403, detail="Only an admin can change your department")
+    for field, value in payload.model_dump(exclude={"name", "professional_title", "department"}).items():
         if field == "skills":
             value = normalize_skills(value)
         setattr(profile, field, value.strip() if isinstance(value, str) and field != "profile_image" else value)

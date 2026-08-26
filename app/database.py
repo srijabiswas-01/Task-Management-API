@@ -6,7 +6,7 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from app.core.config import settings
 
 connect_args = (
-    {"check_same_thread": False}
+    {"check_same_thread": False, "timeout": 30}
     if settings.database_url.startswith("sqlite")
     else {}
 )
@@ -27,6 +27,8 @@ if settings.database_url.startswith("sqlite"):
     def enable_sqlite_foreign_keys(dbapi_connection, _):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
@@ -38,4 +40,8 @@ class Base(DeclarativeBase):
 
 def get_db() -> Generator[Session, None, None]:
     with SessionLocal() as session:
-        yield session
+        try:
+            yield session
+        except Exception:
+            session.rollback()
+            raise

@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException
+from sqlalchemy import select
 
 from app.core.config import settings
 from app.dependencies import CurrentUser, DB, require_project_admin
-from app.models import ChecklistAction, ChecklistItem, Task, TaskStatus
+from app.models import ChecklistAction, ChecklistItem, Task, TaskAssignee, TaskStatus, Team, TeamMember
 from app.routers.projects import accessible_project
 from app.routers.tasks import set_task_schedule, sync_board_column_to_status
 from app.schemas import (
@@ -27,6 +28,12 @@ def plan_tasks(
     current_user: CurrentUser,
 ) -> AITaskPlanResponse:
     project = accessible_project(db, project_id, current_user.id)
+    team = db.get(Team, payload.team_id)
+    if team is None or team.workspace_id != project.workspace_id:
+        raise HTTPException(status_code=400, detail="Select a team in this workspace")
+    allocations = list(db.scalars(select(TeamMember).where(TeamMember.team_id == team.id, TeamMember.project_id == project.id)).all())
+    if not allocations:
+        raise HTTPException(status_code=400, detail="Allocate at least one team member to this project before AI planning")
     try:
         plan, provider, model, fallback_used = generate_task_plan(
             project.name,
@@ -43,6 +50,12 @@ def plan_tasks(
                 "Check provider keys, quotas, and model names."
             ),
         ) from exc
+    delivery_budget = (project.budget or 0) * (100 - project.contingency_percent) // 100
+    total_weight = sum(task.story_points or 1 for task in plan.tasks) or len(plan.tasks)
+    for index, task in enumerate(plan.tasks):
+        task.assignee_ids = [allocations[index % len(allocations)].user_id]
+        task.estimated_hours = max(1, (task.story_points or 1) * 4)
+        task.planned_budget = delivery_budget * (task.story_points or 1) // total_weight if delivery_budget else None
     return AITaskPlanResponse(
         **plan.model_dump(),
         provider=provider,
@@ -97,9 +110,13 @@ def confirm_task_plan(
                 due_date=generated.end_date,
             )
             task.story_points = generated.story_points
+            task.estimated_hours = generated.estimated_hours
+            task.planned_budget = generated.planned_budget
             set_task_schedule(task, None, None)
             db.add(task)
             db.flush()
+            for user_id in generated.assignee_ids:
+                db.add(TaskAssignee(task_id=task.id, user_id=user_id))
             for position, text_value in enumerate(generated.checklist):
                 item = ChecklistItem(text=text_value.strip(), position=position)
                 item.actions.append(ChecklistAction(user_id=current_user.id, action="created"))
