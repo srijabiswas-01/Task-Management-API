@@ -13,7 +13,7 @@ from app.dependencies import (
 )
 from app.core.skills import normalize_skills, parse_skills
 from app.core.profile import profile_completion
-from app.models import Comment, Department, Designation, GlobalDepartment, GlobalDesignation, Project, Task, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceMember, WorkspaceRole
+from app.models import ChatConversation, ChatParticipant, ChatType, Comment, Department, Designation, GlobalDepartment, GlobalDesignation, Project, Task, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     MemberAdd,
     MemberAccessUpdate,
@@ -330,7 +330,16 @@ def list_workspaces(db: DB, current_user: CurrentUser) -> list[WorkspaceRead]:
                 Project.workspace_id == workspace.id,
                 Project.project_manager_id == current_user.id,
             ))
-            if allocated is None and managed is None:
+            direct_chat = db.scalar(
+                select(ChatParticipant.id)
+                .join(ChatConversation, ChatConversation.id == ChatParticipant.conversation_id)
+                .where(
+                    ChatConversation.workspace_id == workspace.id,
+                    ChatConversation.chat_type == ChatType.direct,
+                    ChatParticipant.user_id == current_user.id,
+                )
+            )
+            if allocated is None and managed is None and direct_chat is None:
                 continue
         visible.append(
             WorkspaceRead.model_validate(workspace).model_copy(update={"role": role})

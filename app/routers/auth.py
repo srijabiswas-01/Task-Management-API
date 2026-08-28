@@ -28,6 +28,7 @@ def register(payload: UserRegister, db: DB) -> User:
         email=email,
         hashed_password=hash_password(payload.password),
         is_active=is_first_account,
+        is_system_admin=is_first_account,
     )
     db.add(user)
     db.commit()

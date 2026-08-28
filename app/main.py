@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.database import Base, engine
 from app.models import Department, Designation, GlobalDepartment, GlobalDesignation
-from app.routers import ai, auth, boards, notifications, projects, tasks, workspaces
+from app.routers import admin, ai, auth, boards, chat, notifications, projects, tasks, workspaces
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +32,22 @@ async def lifespan(_: FastAPI):
             connection.execute(text(
                 f"ALTER TABLE workspace_members ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT {default}"
             ))
+    user_columns = {column["name"] for column in inspect(engine).get_columns("users")}
+    if "is_system_admin" not in user_columns:
+        default = "0" if engine.dialect.name == "sqlite" else "FALSE"
+        with engine.begin() as connection:
+            connection.execute(text(
+                f"ALTER TABLE users ADD COLUMN is_system_admin BOOLEAN NOT NULL DEFAULT {default}"
+            ))
+            connection.execute(text(
+                "UPDATE users SET is_system_admin = "
+                + ("1" if engine.dialect.name == "sqlite" else "TRUE")
+                + " WHERE id = (SELECT MIN(id) FROM users)"
+            ))
     project_columns = {column["name"] for column in inspect(engine).get_columns("projects")}
     task_columns = {column["name"] for column in inspect(engine).get_columns("tasks")}
     team_member_columns = {column["name"] for column in inspect(engine).get_columns("team_members")}
+    chat_message_columns = {column["name"] for column in inspect(engine).get_columns("chat_messages")} if inspect(engine).has_table("chat_messages") else set()
     designation_columns = {column["name"] for column in inspect(engine).get_columns("global_designations")}
     with engine.begin() as connection:
         if "start_date" not in project_columns:
@@ -59,6 +72,12 @@ async def lifespan(_: FastAPI):
         for table, columns, column, definition in compatibility_columns:
             if column not in columns:
                 connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
+        if chat_message_columns:
+            if "is_deleted" not in chat_message_columns:
+                default = "0" if engine.dialect.name == "sqlite" else "FALSE"
+                connection.execute(text(f"ALTER TABLE chat_messages ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT {default}"))
+            if "deleted_by_id" not in chat_message_columns:
+                connection.execute(text("ALTER TABLE chat_messages ADD COLUMN deleted_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL"))
         if "department_id" not in designation_columns:
             connection.execute(text(
                 "ALTER TABLE global_designations ADD COLUMN department_id INTEGER "
@@ -134,6 +153,8 @@ app.include_router(tasks.router)
 app.include_router(boards.router)
 app.include_router(ai.router)
 app.include_router(notifications.router)
+app.include_router(chat.router)
+app.include_router(admin.router)
 
 frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 app.mount("/static", StaticFiles(directory=frontend_dir), name="static")

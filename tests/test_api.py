@@ -21,6 +21,7 @@ def test_register_login_and_me(client: TestClient):
     )
     assert registered.status_code == 201
     assert "password" not in registered.json()
+    assert registered.json()["is_system_admin"] is True
 
     logged_in = client.post(
         "/auth/login",
@@ -32,6 +33,11 @@ def test_register_login_and_me(client: TestClient):
     me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
     assert me.json()["email"] == "jane@example.com"
+    admin_headers = {"Authorization": f"Bearer {token}"}
+    global_users = client.get("/admin/users", headers=admin_headers)
+    assert global_users.status_code == 200
+    assert global_users.json()[0]["email"] == "jane@example.com"
+    assert client.get("/admin/skills", headers=admin_headers).status_code == 200
 
 
 def test_auth_normalizes_email_and_rejects_bad_credentials(client: TestClient):
@@ -659,6 +665,10 @@ def test_assigned_member_gets_persistent_critical_deadline_notification(
         f"/notifications/{reminder['id']}/read", headers=auth_headers
     )
     assert cannot_silently_read.status_code == 400
+    mark_all = client.patch("/notifications/read-all", headers=auth_headers)
+    assert mark_all.status_code == 200
+    assert mark_all.json()["marked_count"] == 0
+    assert client.get("/notifications", headers=auth_headers).json()["critical_count"] == 1
     acknowledged = client.patch(
         f"/notifications/{reminder['id']}/acknowledge", headers=auth_headers
     )
@@ -667,6 +677,97 @@ def test_assigned_member_gets_persistent_critical_deadline_notification(
     refreshed = client.get("/notifications", headers=auth_headers).json()
     assert refreshed["unread_count"] == 0
     assert refreshed["critical_count"] == 0
+
+
+def test_chat_admin_broadcast_and_direct_message_permissions(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    member = client.post(
+        "/auth/register",
+        json={"name": "Chat Member", "email": "chat-member@example.com", "password": "securepass123"},
+    ).json()
+    outsider = client.post(
+        "/auth/register",
+        json={"name": "Outside User", "email": "outside@example.com", "password": "securepass123"},
+    ).json()
+    workspace = client.post(
+        "/workspaces", json={"name": "Chat workspace"}, headers=auth_headers
+    ).json()
+    client.patch(f"/workspaces/{workspace['id']}/users/{member['id']}/approve", headers=auth_headers)
+    client.post(
+        f"/workspaces/{workspace['id']}/members",
+        json={"email": "chat-member@example.com", "role": "member"}, headers=auth_headers,
+    )
+    member_login = client.post(
+        "/auth/login", data={"username": "chat-member@example.com", "password": "securepass123"}
+    ).json()
+    member_headers = {"Authorization": f"Bearer {member_login['access_token']}"}
+
+    announcement = client.post(
+        f"/workspaces/{workspace['id']}/chat/conversations",
+        json={"chat_type": "broadcast", "name": "Company updates"},
+        headers=auth_headers,
+    )
+    assert announcement.status_code == 201
+    announcement_id = announcement.json()["id"]
+    assert client.post(
+        f"/workspaces/{workspace['id']}/chat/conversations/{announcement_id}/messages",
+        json={"body": "Welcome to the workspace"}, headers=auth_headers,
+    ).status_code == 201
+    member_conversations = client.get(
+        f"/workspaces/{workspace['id']}/chat/conversations", headers=member_headers
+    )
+    assert member_conversations.status_code == 200
+    assert member_conversations.json()[0]["can_send"] is False
+    assert client.post(
+        f"/workspaces/{workspace['id']}/chat/conversations/{announcement_id}/messages",
+        json={"body": "Members cannot post here"}, headers=member_headers,
+    ).status_code == 403
+    assert client.delete(
+        f"/workspaces/{workspace['id']}/chat/conversations/{announcement_id}",
+        headers=member_headers,
+    ).status_code == 403
+
+    direct = client.post(
+        f"/workspaces/{workspace['id']}/chat/conversations",
+        json={"chat_type": "direct", "recipient_id": member["id"]}, headers=auth_headers,
+    )
+    assert direct.status_code == 201
+    assert {item["id"] for item in direct.json()["participants"]} == {
+        member["id"], client.get("/auth/me", headers=auth_headers).json()["id"]
+    }
+    visible_workspaces = client.get("/workspaces", headers=member_headers).json()
+    assert workspace["id"] in {item["id"] for item in visible_workspaces}
+    member_direct = next(
+        item for item in client.get(
+            f"/workspaces/{workspace['id']}/chat/conversations", headers=member_headers
+        ).json() if item["id"] == direct.json()["id"]
+    )
+    assert member_direct["name"] == "Test User"
+    direct_message = client.post(
+        f"/workspaces/{workspace['id']}/chat/conversations/{direct.json()['id']}/messages",
+        json={"body": "Private admin message"}, headers=auth_headers,
+    ).json()
+    assert client.delete(
+        f"/workspaces/{workspace['id']}/chat/conversations/{direct.json()['id']}/messages/{direct_message['id']}",
+        headers=member_headers,
+    ).status_code == 403
+    deleted_message = client.delete(
+        f"/workspaces/{workspace['id']}/chat/conversations/{direct.json()['id']}/messages/{direct_message['id']}",
+        headers=auth_headers,
+    )
+    assert deleted_message.status_code == 200
+    assert deleted_message.json()["is_deleted"] is True
+    assert deleted_message.json()["body"] == ""
+    # A user without workspace membership cannot inspect either conversation.
+    client.patch(f"/workspaces/{workspace['id']}/users/{outsider['id']}/approve", headers=auth_headers)
+    outsider_login = client.post(
+        "/auth/login", data={"username": "outside@example.com", "password": "securepass123"}
+    ).json()
+    outsider_headers = {"Authorization": f"Bearer {outsider_login['access_token']}"}
+    assert client.get(
+        f"/workspaces/{workspace['id']}/chat/conversations", headers=outsider_headers
+    ).status_code == 404
 
 
 def test_workspace_admin_can_delete_project_and_all_children(
@@ -1257,3 +1358,22 @@ def test_incomplete_profile_cannot_be_allocated_and_member_cannot_set_admin_fiel
     )
     assert marked_read.status_code == 200
     assert marked_read.json()["is_read"] is True
+
+    custom = client.post(
+        f"/notifications/profile-completion/{workspace['id']}",
+        json={
+            "user_ids": [member["id"]],
+            "title": "Profile information required",
+            "message": "Please complete your profile before Friday's allocation review.",
+        },
+        headers=auth_headers,
+    )
+    assert custom.status_code == 200
+    refreshed_reminder = client.get("/notifications", headers=member_headers).json()["items"][0]
+    assert refreshed_reminder["title"] == "Profile information required"
+    assert refreshed_reminder["message"] == "Please complete your profile before Friday's allocation review."
+    assert refreshed_reminder["is_read"] is False
+    mark_all = client.patch("/notifications/read-all", headers=member_headers)
+    assert mark_all.status_code == 200
+    assert mark_all.json()["marked_count"] == 1
+    assert client.get("/notifications", headers=member_headers).json()["unread_count"] == 0

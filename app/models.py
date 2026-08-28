@@ -46,6 +46,13 @@ class TaskStatus(str, Enum):
     done = "done"
 
 
+class ChatType(str, Enum):
+    broadcast = "broadcast"
+    project = "project"
+    team = "team"
+    direct = "direct"
+
+
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -63,6 +70,7 @@ class User(TimestampMixin, Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_system_admin: Mapped[bool] = mapped_column(Boolean, default=False)
 
     memberships: Mapped[list["WorkspaceMember"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -120,6 +128,9 @@ class Workspace(TimestampMixin, Base):
         back_populates="workspace", cascade="all, delete-orphan"
     )
     projects: Mapped[list["Project"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+    chat_conversations: Mapped[list["ChatConversation"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
     )
 
@@ -319,6 +330,73 @@ class Project(TimestampMixin, Base):
     tasks: Mapped[list["Task"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
+
+
+class ChatConversation(TimestampMixin, Base):
+    __tablename__ = "chat_conversations"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "project_id", "chat_type", name="uq_project_chat"),
+        UniqueConstraint("workspace_id", "team_id", "chat_type", name="uq_team_chat"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    chat_type: Mapped[ChatType] = mapped_column(SqlEnum(ChatType), index=True)
+    name: Mapped[str] = mapped_column(String(180))
+    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="chat_conversations")
+    project: Mapped["Project | None"] = relationship()
+    team: Mapped["Team | None"] = relationship()
+    creator: Mapped["User"] = relationship(foreign_keys=[created_by_id])
+    participants: Mapped[list["ChatParticipant"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
+    messages: Mapped[list["ChatMessage"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
+
+
+class ChatParticipant(TimestampMixin, Base):
+    __tablename__ = "chat_participants"
+    __table_args__ = (UniqueConstraint("conversation_id", "user_id", name="uq_chat_participant"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("chat_conversations.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    last_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    conversation: Mapped["ChatConversation"] = relationship(back_populates="participants")
+    user: Mapped["User"] = relationship()
+
+
+class ChatMessage(TimestampMixin, Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("chat_conversations.id", ondelete="CASCADE"), index=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    body: Mapped[str] = mapped_column(Text)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+    conversation: Mapped["ChatConversation"] = relationship(back_populates="messages")
+    sender: Mapped["User"] = relationship(foreign_keys=[sender_id])
+
+
+class ChatNotification(TimestampMixin, Base):
+    __tablename__ = "chat_notifications"
+    __table_args__ = (UniqueConstraint("message_id", "user_id", name="uq_chat_message_recipient"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("chat_messages.id", ondelete="CASCADE"), index=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("chat_conversations.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    title: Mapped[str] = mapped_column(String(220))
+    message: Mapped[str] = mapped_column(Text)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    conversation: Mapped["ChatConversation"] = relationship()
 
 
 class Sprint(TimestampMixin, Base):

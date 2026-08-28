@@ -2,7 +2,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
-from app.models import Priority, ProjectStatus, TaskStatus, WorkspaceRole
+from app.models import ChatType, Priority, ProjectStatus, TaskStatus, WorkspaceRole
 
 
 class ORMModel(BaseModel):
@@ -20,6 +20,7 @@ class UserRead(ORMModel):
     name: str
     email: EmailStr
     is_active: bool
+    is_system_admin: bool = False
     profile_image: str | None = None
     created_at: datetime
 
@@ -78,6 +79,7 @@ class NotificationRead(ORMModel):
     workspace_id: int
     project_id: int | None = None
     task_id: int | None = None
+    conversation_id: int | None = None
     kind: str
     severity: str
     title: str
@@ -97,10 +99,71 @@ class NotificationList(BaseModel):
 
 class ProfileReminderSend(BaseModel):
     user_ids: list[int] = Field(min_length=1, max_length=100)
+    title: str | None = Field(default=None, min_length=2, max_length=220)
+    message: str | None = Field(default=None, min_length=2, max_length=3000)
 
 
 class ProfileReminderResult(BaseModel):
     sent_count: int
+
+
+class NotificationReadAllResult(BaseModel):
+    marked_count: int
+
+
+class ChatUserRead(BaseModel):
+    id: int
+    name: str
+    email: str
+    profile_image: str | None = None
+
+
+class ChatConversationCreate(BaseModel):
+    chat_type: ChatType
+    name: str | None = Field(default=None, max_length=180)
+    project_id: int | None = None
+    team_id: int | None = None
+    recipient_id: int | None = None
+
+
+class ChatMessageCreate(BaseModel):
+    body: str = Field(min_length=1, max_length=5000)
+
+
+class ChatMessageRead(BaseModel):
+    id: int
+    conversation_id: int
+    sender: ChatUserRead
+    body: str
+    is_deleted: bool = False
+    deleted_by_id: int | None = None
+    created_at: datetime
+
+
+class ChatConversationRead(BaseModel):
+    id: int
+    workspace_id: int
+    chat_type: ChatType
+    name: str
+    project_id: int | None
+    team_id: int | None
+    participants: list[ChatUserRead]
+    last_message: ChatMessageRead | None
+    unread_count: int
+    can_send: bool
+    can_clear: bool = False
+
+
+class ChatScopeRead(BaseModel):
+    id: int
+    name: str
+
+
+class ChatOptionsRead(BaseModel):
+    recipients: list[ChatUserRead]
+    projects: list[ChatScopeRead]
+    teams: list[ChatScopeRead]
+    can_broadcast: bool
 
 
 class MemberAdd(BaseModel):

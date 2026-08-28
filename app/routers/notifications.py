@@ -7,8 +7,14 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.profile import profile_completion
 from app.dependencies import CurrentUser, DB, require_workspace_admin
-from app.models import Notification, ProfileCompletionReminder, Task, TaskAssignee, TaskStatus, User
-from app.schemas import NotificationList, NotificationRead, ProfileReminderResult, ProfileReminderSend
+from app.models import ChatNotification, Notification, ProfileCompletionReminder, Task, TaskAssignee, TaskStatus, User
+from app.schemas import (
+    NotificationList,
+    NotificationRead,
+    NotificationReadAllResult,
+    ProfileReminderResult,
+    ProfileReminderSend,
+)
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
@@ -169,31 +175,41 @@ def send_profile_completion_reminders(
     require_workspace_admin(db, workspace_id, current_user.id)
     user_ids = list(dict.fromkeys(payload.user_ids))
     users = list(db.scalars(
-        select(User).where(User.id.in_(user_ids), User.is_active.is_(True))
+        select(User).options(selectinload(User.profile)).where(
+            User.id.in_(user_ids), User.is_active.is_(True)
+        )
     ).all())
     if len(users) != len(user_ids):
         raise HTTPException(status_code=400, detail="Select active registered users only")
+    existing_reminders = {
+        reminder.user_id: reminder for reminder in db.scalars(
+            select(ProfileCompletionReminder).where(
+                ProfileCompletionReminder.workspace_id == workspace_id,
+                ProfileCompletionReminder.user_id.in_(user_ids),
+            )
+        ).all()
+    }
     sent_count = 0
     for user in users:
         percent, missing = profile_completion(user, user.profile)
         if percent == 100:
             continue
-        reminder = db.scalar(select(ProfileCompletionReminder).where(
-            ProfileCompletionReminder.workspace_id == workspace_id,
-            ProfileCompletionReminder.user_id == user.id,
-        ))
-        message = (
+        reminder = existing_reminders.get(user.id)
+        default_message = (
             f"Your profile is {percent}% complete. Please add: {', '.join(missing)}. "
             "A 100% complete profile is required for team allocation."
         )
+        title = payload.title.strip() if payload.title else "Complete your profile"
+        message = payload.message.strip() if payload.message else default_message
         if reminder is None:
             reminder = ProfileCompletionReminder(
                 workspace_id=workspace_id, user_id=user.id, sent_by_id=current_user.id,
-                message=message, completion_percent=percent,
+                title=title, message=message, completion_percent=percent,
             )
             db.add(reminder)
         else:
             reminder.sent_by_id = current_user.id
+            reminder.title = title
             reminder.message = message
             reminder.completion_percent = percent
             reminder.is_read = False
@@ -215,10 +231,49 @@ def get_notification(db: DB, notification_id: int, user_id: int) -> Notification
     return notification
 
 
+@router.patch("/read-all", response_model=NotificationReadAllResult)
+def mark_all_normal_notifications_read(
+    db: DB, current_user: CurrentUser
+) -> NotificationReadAllResult:
+    normal_notifications = list(db.scalars(select(Notification).where(
+        Notification.user_id == current_user.id,
+        Notification.severity != "critical",
+        Notification.is_read.is_(False),
+    )).all())
+    profile_reminders = list(db.scalars(select(ProfileCompletionReminder).where(
+        ProfileCompletionReminder.user_id == current_user.id,
+        ProfileCompletionReminder.is_read.is_(False),
+    )).all())
+    for notification in [*normal_notifications, *profile_reminders]:
+        notification.is_read = True
+    db.commit()
+    return NotificationReadAllResult(
+        marked_count=len(normal_notifications) + len(profile_reminders)
+    )
+
+
 @router.patch("/{notification_id}/read", response_model=NotificationRead)
 def mark_notification_read(
     notification_id: str, db: DB, current_user: CurrentUser
 ) -> NotificationRead:
+    if notification_id.startswith("chat-"):
+        try:
+            alert_id = int(notification_id.removeprefix("chat-"))
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="Notification not found") from error
+        alert = db.scalar(select(ChatNotification).where(
+            ChatNotification.id == alert_id, ChatNotification.user_id == current_user.id,
+        ))
+        if alert is None:
+            raise HTTPException(status_code=404, detail="Notification not found")
+        alert.is_read = True; db.commit(); db.refresh(alert)
+        return NotificationRead(
+            id=f"chat-{alert.id}", workspace_id=alert.workspace_id,
+            conversation_id=alert.conversation_id, kind="chat_message", severity="normal",
+            title=alert.title, message=alert.message, is_read=True,
+            is_acknowledged=False, is_resolved=False,
+            created_at=alert.created_at, updated_at=alert.updated_at,
+        )
     if notification_id.startswith("profile-"):
         try:
             reminder_id = int(notification_id.removeprefix("profile-"))
