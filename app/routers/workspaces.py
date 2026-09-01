@@ -12,7 +12,7 @@ from app.dependencies import (
     require_team_admin,
 )
 from app.core.skills import normalize_skills, parse_skills
-from app.core.profile import profile_completion
+from app.core.profile import profile_completion, validate_profile_image
 from app.models import ChatConversation, ChatParticipant, ChatType, Comment, Department, Designation, GlobalDepartment, GlobalDesignation, Project, Task, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     MemberAdd,
@@ -80,16 +80,25 @@ def validate_profile_catalog(
 
 def validate_team_manager(
     db: DB, workspace_id: int, user_id: int, designation_name: str
-) -> None:
-    user = db.scalar(select(User).where(User.id == user_id, User.is_active.is_(True)))
-    designation = db.scalar(select(GlobalDesignation.id).where(
-        GlobalDesignation.name == designation_name.strip(),
+) -> str:
+    user = db.scalar(select(User).options(selectinload(User.profile)).where(
+        User.id == user_id, User.is_active.is_(True), User.is_member.is_(True)
     ))
     if user is None:
-        raise HTTPException(status_code=400, detail="Select an active registered user as manager")
-    if designation is None:
-        raise HTTPException(status_code=400, detail="Select a valid manager designation")
+        raise HTTPException(status_code=400, detail="Select an active Member or Admin as manager")
+    completion, _ = profile_completion(user, user.profile)
+    if completion < 50:
+        raise HTTPException(status_code=400, detail=f"This member's profile is only {completion}% complete. At least 50% profile completion is required before project or team allocation.")
+    profile_designation = user.profile.professional_title if user.profile else None
+    profile_department = user.profile.department if user.profile else None
+    valid = db.scalar(select(GlobalDesignation.id).join(GlobalDepartment).where(
+        GlobalDesignation.name == profile_designation,
+        GlobalDepartment.name == profile_department,
+    )) if profile_designation and profile_department else None
+    if valid is None:
+        raise HTTPException(status_code=400, detail="Assign the manager's department and designation first")
     ensure_workspace_access(db, workspace_id, user_id)
+    return profile_designation
 
 
 def ensure_workspace_access(db: DB, workspace_id: int, user_id: int) -> WorkspaceMember:
@@ -285,6 +294,10 @@ def delete_designation(
 def create_workspace(
     payload: WorkspaceCreate, db: DB, current_user: CurrentUser
 ) -> Workspace:
+    if not current_user.is_system_admin:
+        raise HTTPException(
+            status_code=403, detail="Only the system administrator can create workspaces"
+        )
     workspace = Workspace(
         name=payload.name.strip(),
         description=payload.description,
@@ -357,10 +370,10 @@ def delete_workspace(
     workspace = db.get(Workspace, workspace_id)
     if workspace is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    if workspace.owner_id != current_user.id:
+    if not current_user.is_system_admin:
         raise HTTPException(
             status_code=403,
-            detail="Only the workspace owner can delete this workspace",
+            detail="Only the system administrator can delete workspaces",
         )
     if payload.workspace_name != workspace.name:
         raise HTTPException(
@@ -378,10 +391,14 @@ def update_workspace(
     db: DB,
     current_user: CurrentUser,
 ) -> Workspace:
-    require_workspace_admin(db, workspace_id, current_user.id)
     workspace = db.get(Workspace, workspace_id)
     if workspace is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    if not current_user.is_system_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the system administrator can update workspaces",
+        )
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(
             workspace,
@@ -432,6 +449,7 @@ def add_member(
     member = WorkspaceMember(
         workspace_id=workspace_id, user_id=user.id, role=payload.role
     )
+    user.is_member = True
     db.add(member)
     db.commit()
     return db.scalar(
@@ -667,11 +685,16 @@ def admin_profile_response(db: DB, user: User) -> UserProfileRead:
     return UserProfileRead(
         name=user.name, email=user.email, project_count=len(projects), projects=projects,
         profile_image=profile.profile_image if profile else None,
-        phone=profile.phone if profile else None, location=profile.location if profile else None,
+        phone=profile.phone if profile else None,
+        location=profile.location if profile else None,
+        location_city=profile.location_city if profile else None,
+        location_state=profile.location_state if profile else None,
+        location_country=profile.location_country if profile else None,
         bio=profile.bio if profile else None,
         professional_title=profile.professional_title if profile else None,
         department=profile.department if profile else None,
         years_experience=profile.years_experience if profile else None,
+        experience_start_date=profile.experience_start_date if profile else None,
         skills=profile.skills if profile else None,
         achievements=profile.achievements if profile else None,
         completion_percent=completion_percent, missing_fields=missing_fields,
@@ -681,6 +704,8 @@ def admin_profile_response(db: DB, user: User) -> UserProfileRead:
 def update_admin_managed_profile(
     db: DB, workspace_id: int, user: User, payload: UserProfileUpdate
 ) -> UserProfileRead:
+    if "profile_image" in payload.model_fields_set:
+        validate_profile_image(payload.profile_image)
     if payload.professional_title and db.scalar(select(GlobalDesignation.id).where(
         GlobalDesignation.name == payload.professional_title,
     )) is None:
@@ -695,7 +720,7 @@ def update_admin_managed_profile(
     if profile is None:
         profile = UserProfile(user_id=user.id)
         db.add(profile)
-    for field, value in payload.model_dump(exclude={"name"}).items():
+    for field, value in payload.model_dump(exclude={"name"}, exclude_unset=True).items():
         if field == "skills":
             value = normalize_skills(value)
         setattr(profile, field, value.strip() if isinstance(value, str) and field != "profile_image" else value)
@@ -789,7 +814,7 @@ def permanently_delete_user(
     for project in db.scalars(select(Project).where(Project.project_manager_id == user_id)).all():
         project.project_manager_id = project.workspace.owner_id
     for manager in db.scalars(select(TeamManager).where(TeamManager.user_id == user_id)).all():
-        manager.user_id = manager.team.workspace.owner_id
+        manager.user_id = manager.team.workspace.owner_id if manager.team.workspace else current_user.id
     for task in db.scalars(select(Task).where(Task.reporter_id == user_id)).all():
         task.reporter_id = task.project.workspace.owner_id
     for task in db.scalars(select(Task).where(Task.assignee_id == user_id)).all():
@@ -809,8 +834,8 @@ def create_team(
     require_workspace_admin(db, workspace_id, current_user.id)
     values = payload.model_dump()
     manager_user_id = values.pop("manager_user_id")
-    manager_designation = values.pop("manager_designation").strip()
-    validate_team_manager(db, workspace_id, manager_user_id, manager_designation)
+    manager_designation = values.pop("manager_designation") or ""
+    manager_designation = validate_team_manager(db, workspace_id, manager_user_id, manager_designation)
     team = Team(workspace_id=workspace_id, **values)
     team.manager_record = TeamManager(
         user_id=manager_user_id, designation=manager_designation
@@ -834,10 +859,10 @@ def update_team(
         raise HTTPException(status_code=404, detail="Team not found")
     values = payload.model_dump(exclude_unset=True)
     manager_user_id = values.pop("manager_user_id", team.manager_user_id)
-    manager_designation = values.pop("manager_designation", team.manager_designation)
-    if manager_user_id is None or manager_designation is None:
+    manager_designation = values.pop("manager_designation", team.manager_designation) or ""
+    if manager_user_id is None:
         raise HTTPException(status_code=400, detail="Every team requires a designated manager")
-    validate_team_manager(db, workspace_id, manager_user_id, manager_designation)
+    manager_designation = validate_team_manager(db, workspace_id, manager_user_id, manager_designation)
     if team.manager_record is None:
         team.manager_record = TeamManager()
     team.manager_record.user_id = manager_user_id
@@ -952,11 +977,15 @@ def allocate_team_member(
     db: DB,
     current_user: CurrentUser,
 ) -> TeamMember:
-    team = require_team_admin(db, team_id, current_user.id)
-    if team.workspace_id != workspace_id:
+    team = db.get(Team, team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+    if not current_user.is_system_admin:
+        require_team_admin(db, team_id, current_user.id)
+    if team.workspace_id is not None and team.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Team not found")
     user = db.scalar(select(User).options(selectinload(User.profile)).where(
-        User.id == payload.user_id, User.is_active.is_(True)
+        User.id == payload.user_id, User.is_active.is_(True), User.is_member.is_(True)
     ))
     project = db.scalar(
         select(Project).where(
@@ -967,20 +996,25 @@ def allocate_team_member(
     if user is None or project is None:
         raise HTTPException(status_code=400, detail="Invalid member or project")
     completion_percent, missing_fields = profile_completion(user, user.profile)
-    if completion_percent < 100:
+    if completion_percent < 50:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Profile is {completion_percent}% complete. Complete these details before "
-                f"team allocation: {', '.join(missing_fields)}"
+                f"This member's profile is only {completion_percent}% complete. "
+                "At least 50% profile completion is required before project or team allocation."
             ),
         )
     ensure_workspace_access(db, workspace_id, payload.user_id)
-    designation = db.scalar(select(GlobalDesignation).where(
-        GlobalDesignation.name == payload.designation.strip(),
-    ))
+    assigned_designation = user.profile.professional_title if user.profile else None
+    assigned_department = user.profile.department if user.profile else None
+    designation = db.scalar(select(GlobalDesignation).join(GlobalDepartment).where(
+        GlobalDesignation.name == assigned_designation,
+        GlobalDepartment.name == assigned_department,
+    )) if assigned_designation and assigned_department else None
     if designation is None:
-        raise HTTPException(status_code=400, detail="Select a valid workspace designation")
+        raise HTTPException(status_code=400, detail="Assign the member's department and designation first")
+    if payload.designation.strip() != designation.name:
+        raise HTTPException(status_code=400, detail="Allocation designation must match the member's assigned designation")
     existing = db.scalar(
         select(TeamMember).where(
             TeamMember.team_id == team_id,
@@ -1016,24 +1050,41 @@ def update_team_member_allocation(
     workspace_id: int, team_id: int, allocation_id: int,
     payload: TeamMemberUpdate, db: DB, current_user: CurrentUser,
 ) -> TeamMember:
-    team = require_team_admin(db, team_id, current_user.id)
-    if team.workspace_id != workspace_id:
+    team = db.get(Team, team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+    if not current_user.is_system_admin:
+        require_team_admin(db, team_id, current_user.id)
+    if team.workspace_id is not None and team.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Team not found")
     allocation = db.scalar(select(TeamMember).where(
         TeamMember.id == allocation_id, TeamMember.team_id == team_id
     ))
     if allocation is None:
         raise HTTPException(status_code=404, detail="Team member allocation not found")
+    user = db.scalar(select(User).options(selectinload(User.profile)).where(
+        User.id == allocation.user_id, User.is_active.is_(True), User.is_member.is_(True)
+    ))
+    if user is None:
+        raise HTTPException(status_code=400, detail="Select an active Member or Admin")
+    completion, _ = profile_completion(user, user.profile)
+    if completion < 50:
+        raise HTTPException(status_code=400, detail=f"This member's profile is only {completion}% complete. At least 50% profile completion is required before project or team allocation.")
     project = db.scalar(select(Project).where(
         Project.id == payload.project_id, Project.workspace_id == workspace_id
     ))
-    designation = db.scalar(select(GlobalDesignation).where(
-        GlobalDesignation.name == payload.designation.strip(),
-    ))
+    assigned_designation = user.profile.professional_title if user.profile else None
+    assigned_department = user.profile.department if user.profile else None
+    designation = db.scalar(select(GlobalDesignation).join(GlobalDepartment).where(
+        GlobalDesignation.name == assigned_designation,
+        GlobalDepartment.name == assigned_department,
+    )) if assigned_designation and assigned_department else None
     if project is None:
         raise HTTPException(status_code=400, detail="Select a valid workspace project")
     if designation is None:
-        raise HTTPException(status_code=400, detail="Select a valid workspace designation")
+        raise HTTPException(status_code=400, detail="Assign the member's department and designation first")
+    if payload.designation.strip() != designation.name:
+        raise HTTPException(status_code=400, detail="Allocation designation must match the member's assigned designation")
     duplicate = db.scalar(select(TeamMember.id).where(
         TeamMember.team_id == team_id,
         TeamMember.user_id == allocation.user_id,
@@ -1060,8 +1111,12 @@ def remove_team_member(
     db: DB,
     current_user: CurrentUser,
 ) -> None:
-    team = require_team_admin(db, team_id, current_user.id)
-    if team.workspace_id != workspace_id:
+    team = db.get(Team, team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+    if not current_user.is_system_admin:
+        require_team_admin(db, team_id, current_user.id)
+    if team.workspace_id is not None and team.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Team not found")
     allocation = db.scalar(
         select(TeamMember).where(

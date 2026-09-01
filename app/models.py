@@ -71,6 +71,7 @@ class User(TimestampMixin, Base):
     hashed_password: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_system_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_member: Mapped[bool] = mapped_column(Boolean, default=False)
 
     memberships: Mapped[list["WorkspaceMember"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -97,10 +98,14 @@ class UserProfile(TimestampMixin, Base):
     profile_image: Mapped[str | None] = mapped_column(Text)
     phone: Mapped[str | None] = mapped_column(String(40))
     location: Mapped[str | None] = mapped_column(String(150))
+    location_city: Mapped[str | None] = mapped_column(String(80))
+    location_state: Mapped[str | None] = mapped_column(String(80))
+    location_country: Mapped[str | None] = mapped_column(String(80))
     bio: Mapped[str | None] = mapped_column(Text)
     professional_title: Mapped[str | None] = mapped_column(String(150))
     department: Mapped[str | None] = mapped_column(String(150))
     years_experience: Mapped[int | None] = mapped_column(Integer)
+    experience_start_date: Mapped[date | None] = mapped_column(Date)
     skills: Mapped[str | None] = mapped_column(Text)
     achievements: Mapped[str | None] = mapped_column(Text)
 
@@ -119,7 +124,7 @@ class Workspace(TimestampMixin, Base):
         back_populates="workspace", cascade="all, delete-orphan"
     )
     teams: Mapped[list["Team"]] = relationship(
-        back_populates="workspace", cascade="all, delete-orphan"
+        back_populates="workspace", passive_deletes=True
     )
     designations: Mapped[list["Designation"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
@@ -231,13 +236,13 @@ class Team(TimestampMixin, Base):
     __tablename__ = "teams"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    workspace_id: Mapped[int] = mapped_column(
-        ForeignKey("workspaces.id", ondelete="CASCADE")
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True
     )
     name: Mapped[str] = mapped_column(String(150))
     description: Mapped[str | None] = mapped_column(Text)
 
-    workspace: Mapped["Workspace"] = relationship(back_populates="teams")
+    workspace: Mapped["Workspace | None"] = relationship(back_populates="teams")
     members: Mapped[list["TeamMember"]] = relationship(
         back_populates="team", cascade="all, delete-orphan"
     )
@@ -670,3 +675,28 @@ class ProfileCompletionReminder(TimestampMixin, Base):
     completion_percent: Mapped[int] = mapped_column(Integer, default=0)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     is_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class GlobalProfileReminder(TimestampMixin, Base):
+    __tablename__ = "global_profile_reminders"
+    __table_args__ = (UniqueConstraint("user_id", name="uq_global_profile_reminder_user"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    sent_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    title: Mapped[str] = mapped_column(String(220), default="Complete your profile")
+    message: Mapped[str] = mapped_column(Text)
+    completion_percent: Mapped[int] = mapped_column(Integer, default=0)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class GlobalAnnouncement(TimestampMixin, Base):
+    __tablename__ = "global_announcements"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    sent_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    title: Mapped[str] = mapped_column(String(220))
+    message: Mapped[str] = mapped_column(Text)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)

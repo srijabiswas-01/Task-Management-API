@@ -3,7 +3,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = {
   token: localStorage.getItem("orbit_token"), profile: null,
   user: null, workspaces: [], workspace: null, projects: [], project: null, chatConversations: [], chatOptions: null, chatMessages: [], activeChatId: null, chatFilter: "all", chatQuery: "",
-  tasks: [], sprints: [], members: [], teams: [], teamMembers: [], designations: [], departments: [], userDirectory: [], skillCatalog: [], skillMembers: [], selectedProfileUsers: new Set(), notifications: [], notificationUnread: 0, notificationCritical: 0, dashboard: null, board: null, report: null, projectLoading: false, view: "dashboard"
+  tasks: [], sprints: [], members: [], teams: [], teamMembers: [], designations: [], departments: [], userDirectory: [], filteredUserDirectory: [], userDirectoryPage: 1, skillCatalog: [], skillMembers: [], selectedProfileUsers: new Set(), notifications: [], notificationUnread: 0, notificationCritical: 0, dashboard: null, board: null, report: null, projectLoading: false, view: "dashboard"
 };
 const VIEW_PATHS = {
   dashboard: "/app/overview",
@@ -37,7 +37,16 @@ function pretty(value = "") { return value.replaceAll("_", " ").replace(/\b\w/g,
 function designationChoices(){return state.designations.map(item=>[item.name,`${item.department_name||"Unassigned"} · ${item.name}`])}
 function avatar(user, className="avatar"){const name=user?.name||"User",photo=user?.profile_image;return `<b class="${className}${photo?" has-photo":""}"${photo?` style="background-image:url('${esc(photo)}')"`:""}>${photo?"":esc(name.slice(0,2).toUpperCase())}</b>`}
 function hydrateAvatars(){const users=[...state.members.map(item=>item.user),...state.userDirectory,...state.skillMembers,state.user?{...state.user,profile_image:state.profile?.profile_image}:null].filter(Boolean);$$('.avatar').forEach(element=>{if(element.classList.contains('has-photo'))return;const context=element.parentElement?.textContent||"";const matches=users.filter(user=>user.profile_image&&user.email&&context.includes(user.email));if(matches.length!==1)return;const user=matches[0];element.textContent="";element.style.backgroundImage=`url("${user.profile_image}")`;element.classList.add('has-photo')})}
-function isAdmin() { return Boolean(state.user?.is_system_admin)||state.members.find(m => m.user_id === state.user?.id)?.role === "admin"; }
+function isAdmin() { return Boolean(state.user?.is_system_admin); }
+function profileOnboardingRequired(){const ignored=new Set(["Designation","Department"]);return (state.profile?.missing_fields||[]).some(field=>!ignored.has(field))}
+const NO_WORKSPACE_ALLOWED_VIEWS=new Set(["notifications","chat","profile"]);
+function noWorkspaceMemberRestricted(view=state.view){return Boolean(state.user&&!state.user.is_system_admin&&!state.workspace&&!NO_WORKSPACE_ALLOWED_VIEWS.has(view))}
+function updateSidebarAccess(){
+  const hideWorkspaceViews=Boolean(state.user&&!state.user.is_system_admin&&!state.workspace);
+  $$("#main-nav [data-view]").forEach(button=>{
+    if(["dashboard","projects","board","gantt","report"].includes(button.dataset.view))button.classList.toggle("hidden",hideWorkspaceViews);
+  });
+}
 function canManageProject(project=state.project) { return isAdmin() || Boolean(project&&project.project_manager_id===state.user?.id); }
 function canCollaborateProject(project=state.project) { return canManageProject(project) || Boolean(project&&state.teamMembers.some(a=>a.project_id===project.id&&a.user_id===state.user?.id)); }
 function actorName(userId) { return state.members.find(m=>m.user_id===userId)?.user.name || (state.user?.id===userId?state.user.name:"Unknown member"); }
@@ -75,7 +84,7 @@ function inputDateTime(value) {
   return local.toISOString().slice(0,16);
 }
 function toast(message, error = false) {
-  const el = $("#toast"); el.textContent = message; el.className = `toast show${error ? " error" : ""}`;
+  const el = $("#toast"); el.textContent = message; el.className = `toast show ${error ? "error" : "success"}`;
   clearTimeout(toast.timer); toast.timer = setTimeout(() => el.className = "toast", 3000);
 }
 async function api(path, options = {}) {
@@ -145,8 +154,14 @@ $$("[data-password-target]").forEach(button=>button.onclick=()=>{
   button.title=showing?"Show password":"Hide password";
   button.classList.toggle("showing",!showing);
 });
+function clearFieldErrors(form){$$('.field-error',form).forEach(item=>item.remove());$$('.input-invalid',form).forEach(input=>input.classList.remove('input-invalid'))}
+function fieldError(input,message){if(!input)return;input.classList.add('input-invalid');const error=document.createElement('small');error.className='field-error';error.textContent=message;(input.closest('.password-field')||input).insertAdjacentElement('afterend',error)}
+function validEmail(input){return input.validity.valid&&input.value.trim().length>0}
+function validateAuthForm(form,isRegistration=false){clearFieldErrors(form);let valid=true;const name=isRegistration?$('#register-name'):null,email=isRegistration?$('#register-email'):$('#login-email'),password=isRegistration?$('#register-password'):$('#login-password');if(name&&name.value.trim().length<2){fieldError(name,'Full name must contain at least 2 characters.');valid=false}if(!validEmail(email)){fieldError(email,'Enter a valid email address.');valid=false}if(password.value.length<8){fieldError(password,'Password must contain at least 8 characters.');valid=false}else if(password.value.length>128){fieldError(password,'Password must not exceed 128 characters.');valid=false}return valid}
+$$('#login-form input,#register-form input').forEach(input=>input.addEventListener('input',()=>{input.classList.remove('input-invalid');const label=input.closest('label');label?.querySelectorAll('.field-error').forEach(error=>error.remove())}));
 $("#login-form").onsubmit = async e => {
   e.preventDefault();
+  if(!validateAuthForm(e.currentTarget))return;
   $("#auth-error").classList.add("hidden");
   const submitButton = $('button[type="submit"]', e.currentTarget);
   submitButton.disabled = true;
@@ -156,7 +171,7 @@ $("#login-form").onsubmit = async e => {
     const data = await api("/auth/login", {method:"POST", body, headers:{"Content-Type":"application/x-www-form-urlencoded"}});
     state.token = data.access_token; localStorage.setItem("orbit_token", state.token); await boot();
   } catch (err) {
-    authError(err.message);
+    if(/incorrect email or password/i.test(err.message))fieldError($("#login-password"),err.message);else authError(err.message);
   } finally {
     submitButton.disabled = false;
     submitButton.innerHTML = "Sign in <span>→</span>";
@@ -164,6 +179,7 @@ $("#login-form").onsubmit = async e => {
 };
 $("#register-form").onsubmit = async e => {
   e.preventDefault();
+  if(!validateAuthForm(e.currentTarget,true))return;
   try {
     const user = await api("/auth/register", {method:"POST", body:JSON.stringify({name:$("#register-name").value,email:$("#register-email").value,password:$("#register-password").value})});
     if (user.is_active) {
@@ -181,7 +197,7 @@ $("#register-form").onsubmit = async e => {
       $("#auth-switch").textContent = "Create an account";
       authError("Your request was sent to the administrator for approval.", true);
     }
-  } catch (err) { authError(err.message); }
+  } catch (err) { if(/email is already registered/i.test(err.message))fieldError($("#register-email"),err.message);else authError(err.message); }
 };
 function authError(message, success = false) { $("#auth-error").textContent = message; $("#auth-error").classList.toggle("success", success); $("#auth-error").classList.remove("hidden"); }
 function logout(show = true) {
@@ -198,6 +214,10 @@ function showAuth() {
   $("#auth-screen").classList.remove("hidden");
 }
 $("#logout-button").onclick = () => logout();
+$("#header-logout-button").onclick = () => logout();
+$("#header-profile-button").onclick = () => {$("#header-account-menu").classList.add("hidden");navigate("profile")};
+$("#header-account-button").onclick = event => {event.stopPropagation();const menu=$("#header-account-menu"),hidden=menu.classList.toggle("hidden");$("#header-account-button").setAttribute("aria-expanded",String(!hidden))};
+document.addEventListener("click",event=>{if(!event.target.closest(".header-account")){$("#header-account-menu").classList.add("hidden");$("#header-account-button").setAttribute("aria-expanded","false")}});
 
 
 function profileFallback() {
@@ -207,6 +227,11 @@ function profileFallback() {
     department: null, years_experience: null, skills: null, achievements: null,
     project_count: 0, projects: []
   };
+}
+function syncUserChrome(){
+  const name=state.profile?.name||state.user?.name||"User",email=state.profile?.email||state.user?.email||"",designation=[state.profile?.professional_title,state.profile?.department].filter(Boolean).join(" · ")||"Designation not assigned",photo=state.profile?.profile_image;
+  [["#user-name",name],["#user-email",email],["#user-designation",designation],["#header-user-name",name],["#header-user-email",email],["#header-user-designation",designation]].forEach(([selector,value])=>{const element=$(selector);if(element)element.textContent=value});
+  ["#user-avatar","#header-user-avatar"].forEach(selector=>{const avatar=$(selector);if(!avatar)return;avatar.textContent=photo?"":name.slice(0,2).toUpperCase();avatar.style.backgroundImage=photo?`url("${photo}")`:"";avatar.classList.toggle("has-photo",Boolean(photo))});
 }
 async function boot() {
   try {
@@ -219,35 +244,37 @@ async function boot() {
     return;
   }
   try {
-    [state.workspaces,state.profile] = await Promise.all([
+    [state.workspaces,state.profile,state.skillCatalog] = await Promise.all([
       api("/workspaces"),
       api("/auth/profile").catch(err => {
         console.error("Profile loading failed", err);
         return profileFallback();
-      })
+      }),
+      api("/auth/skill-catalog").catch(err=>{console.error("Skill catalog loading failed",err);return []})
     ]);
     const savedId = Number(localStorage.getItem("orbit_workspace"));
     state.workspace = state.workspaces.find(w => w.id === savedId) || state.workspaces[0] || null;
-    $("#user-name").textContent = state.user.name; $("#user-email").textContent = state.user.email;
-    $("#user-designation").textContent=[state.profile.professional_title,state.profile.department].filter(Boolean).join(" · ")||"Designation not assigned";
-    $("#user-avatar").textContent = state.user.name.slice(0,2).toUpperCase();
-    $("#user-avatar").style.backgroundImage=state.profile.profile_image?`url("${state.profile.profile_image}")`:"";
-    $("#user-avatar").classList.toggle("has-photo",Boolean(state.profile.profile_image));
+    if(profileOnboardingRequired()){state.view="profile";history.replaceState({view:"profile"},"",VIEW_PATHS.profile)}
+    else if(noWorkspaceMemberRestricted()){state.view="profile";history.replaceState({view:"profile"},"",VIEW_PATHS.profile)}
+    syncUserChrome();
     $("#auth-error").classList.add("hidden");
     $("#auth-screen").classList.add("hidden"); $("#app-shell").classList.remove("hidden");
     if (!PATH_VIEWS[window.location.pathname]) {
       history.replaceState({view:state.view}, "", VIEW_PATHS[state.view]);
     }
     updateWorkspaceUI();
+    updateSidebarAccess();
     $("#admin-users-nav").classList.toggle("hidden",!isAdmin());
     $("#admin-skills-nav").classList.toggle("hidden",!isAdmin());
     $("#admin-people-nav").classList.toggle("hidden",!isAdmin());
     await loadNotifications();startNotificationPolling();
     $("#boot-screen").classList.add("hidden");
-    if (!state.workspace) {
+    if(state.view==="profile") {
+      render();
+    } else if (!state.workspace) {
       state.chatConversations=[];state.chatOptions=null;state.chatMessages=[];state.activeChatId=null;updateChatCount();
       await loadNoWorkspaceMIS();
-      if(["people","users","skills","notifications","profile","chat"].includes(state.view))render();else renderNoWorkspace();
+      if(["people","users","skills","notifications","chat"].includes(state.view))render();else renderNoWorkspace();
     } else if(state.view==="chat") {
       state.chatOptions=await api(`/workspaces/${state.workspace.id}/chat/options`);
       await loadChats();
@@ -265,8 +292,8 @@ function updateWorkspaceUI() {
   $("#workspace-name").textContent = state.workspace?.name || "Choose workspace";
   $("#workspace-initial").textContent = state.workspace?.name?.[0]?.toUpperCase() || "W";
   $("#workspace-menu").innerHTML = state.workspaces.map(w => `<button data-id="${w.id}">${esc(w.name)}</button>`).join("") +
-    (state.workspace ? `<button class="workspace-settings" data-workspace-settings="true">⚙ Workspace settings</button>` : "") +
-    `<button class="new-workspace" data-new="true">＋ Create workspace</button>`;
+    (state.workspace&&state.user?.is_system_admin ? `<button class="workspace-settings" data-workspace-settings="true">⚙ Workspace settings</button>` : "") +
+    (state.user?.is_system_admin?`<button class="new-workspace" data-new="true">＋ Create workspace</button>`:"");
   $$("[data-id]", $("#workspace-menu")).forEach(btn => btn.onclick = async () => {
     const nextWorkspace=state.workspaces.find(w=>w.id===Number(btn.dataset.id));
     if(!nextWorkspace||nextWorkspace.id===state.workspace?.id){$("#workspace-menu").classList.add("hidden");return}
@@ -275,7 +302,7 @@ function updateWorkspaceUI() {
     $("#workspace-menu").classList.add("hidden"); updateWorkspaceUI();if(state.view==="chat"){state.chatOptions=await api(`/workspaces/${state.workspace.id}/chat/options`);await loadChats()}else await loadWorkspace();
   });
   $("[data-workspace-settings]", $("#workspace-menu"))?.addEventListener("click", workspaceSettingsModal);
-  $("[data-new]", $("#workspace-menu")).onclick = workspaceModal;
+  $("[data-new]", $("#workspace-menu"))?.addEventListener("click",workspaceModal);
 }
 function activeWorkspace() {
   if (state.workspace) return state.workspace;
@@ -331,11 +358,11 @@ async function loadWorkspace() {
     const needsProject=["board","gantt","sprints","report"].includes(state.view);
     const [secondary]=await Promise.all([
       Promise.all([
-        api(`/workspaces/${workspaceId}/teams`),api(`/workspaces/${workspaceId}/team-members`),
-        api(`/workspaces/${workspaceId}/designations`),api(`/workspaces/${workspaceId}/departments`),
+        state.user?.is_system_admin?api("/admin/teams"):api(`/workspaces/${workspaceId}/teams`),state.user?.is_system_admin?api("/admin/team-members"):api(`/workspaces/${workspaceId}/team-members`),
+        state.user?.is_system_admin?api("/admin/designations"):api(`/workspaces/${workspaceId}/designations`),state.user?.is_system_admin?api("/admin/departments"):api(`/workspaces/${workspaceId}/departments`),
         api(`/workspaces/${workspaceId}/skill-catalog`),
-        isAdmin()?api(`/workspaces/${workspaceId}/user-directory`):Promise.resolve([]),
-        isAdmin()?api(`/workspaces/${workspaceId}/skill-members`):Promise.resolve([])
+        isAdmin()?api("/admin/users"):Promise.resolve([]),
+        isAdmin()?api("/admin/skills"):Promise.resolve([])
       ]),
       needsProject?loadProject():Promise.resolve()
     ]);
@@ -346,7 +373,7 @@ async function loadWorkspace() {
 }
 async function loadNoWorkspaceMIS(){
   if(!state.user?.is_system_admin)return;
-  [state.userDirectory,state.skillMembers]=await Promise.all([api("/admin/users"),api("/admin/skills")]);
+  [state.userDirectory,state.skillMembers,state.teams,state.teamMembers,state.designations,state.departments]=await Promise.all([api("/admin/users"),api("/admin/skills"),api("/admin/teams"),api("/admin/team-members"),api("/admin/designations"),api("/admin/departments")]);
   state.skillCatalog=[...new Set(state.skillMembers.flatMap(member=>member.skills))].sort((a,b)=>a.localeCompare(b));
 }
 async function loadProject() {
@@ -381,13 +408,17 @@ if(localStorage.getItem("orbit_sidebar_collapsed")==="true")$("#app-shell").clas
 $("#mobile-menu").onclick = () => {if(window.innerWidth>1000){const collapsed=$("#app-shell").classList.toggle("sidebar-collapsed");localStorage.setItem("orbit_sidebar_collapsed",String(collapsed))}else $(".sidebar").classList.toggle("open")};
 $("#main-nav").onclick = async e => {
   const btn = e.target.closest("[data-view]"); if (!btn) return;
-  navigate(btn.dataset.view);
+  const openedView=navigate(btn.dataset.view);
+  if(openedView!==btn.dataset.view)return;
   if(btn.dataset.view==="chat"){try{state.workspaces=await api("/workspaces");const savedId=Number(localStorage.getItem("orbit_workspace"));state.workspace=state.workspaces.find(item=>item.id===savedId)||state.workspaces[0]||null;updateWorkspaceUI();if(state.workspace){state.chatOptions=await api("/workspaces/"+state.workspace.id+"/chat/options");await loadChats()}else{state.chatConversations=[];state.chatMessages=[];state.activeChatId=null;render()}}catch(err){toast(err.message,true)}}
   if(["board","gantt","sprints","report"].includes(btn.dataset.view)&&state.project&&(!state.board||(btn.dataset.view==="report"&&!state.report))){
     try{await loadProject();render()}catch(err){state.projectLoading=false;toast(err.message,true)}
   }
 };
 function navigate(view, replace = false) {
+  if(profileOnboardingRequired()&&view!=="profile"){toast("Complete your profile before continuing",true);view="profile";replace=true}
+  else if(noWorkspaceMemberRestricted(view)){toast("No workspace is assigned. You can still use Messages, Notifications, and My profile.",true);view="profile";replace=true}
+  closeModal();
   state.view = view;
   const path = VIEW_PATHS[view] || VIEW_PATHS.dashboard;
   if (window.location.pathname !== path) {
@@ -396,13 +427,25 @@ function navigate(view, replace = false) {
   $$("#main-nav button").forEach(button => button.classList.toggle("active", button.dataset.view === view));
   $(".sidebar").classList.remove("open");
   render();
+  return view;
 }
 window.addEventListener("popstate", () => {
+  closeModal();
   state.view = PATH_VIEWS[window.location.pathname] || "dashboard";
+  if(profileOnboardingRequired()&&state.view!=="profile")state.view="profile";
+  else if(noWorkspaceMemberRestricted())state.view="profile";
+  if(window.location.pathname!==VIEW_PATHS[state.view])history.replaceState({view:state.view},"",VIEW_PATHS[state.view]);
   $$("#main-nav button").forEach(button => button.classList.toggle("active", button.dataset.view === state.view));
   render();
 });
 function render() {
+  if(profileOnboardingRequired()&&state.view!=="profile"){
+    state.view="profile";
+    history.replaceState({view:"profile"},"",VIEW_PATHS.profile);
+  }else if(noWorkspaceMemberRestricted()){
+    state.view="profile";
+    history.replaceState({view:"profile"},"",VIEW_PATHS.profile);
+  }
   if(["people","users","skills"].includes(state.view)&&!isAdmin()){
     state.view="dashboard";
     history.replaceState({view:"dashboard"},"",VIEW_PATHS.dashboard);
@@ -413,6 +456,7 @@ function render() {
   $("#admin-users-nav").classList.toggle("hidden",!isAdmin());
   $("#admin-skills-nav").classList.toggle("hidden",!isAdmin());
   $("#admin-people-nav").classList.toggle("hidden",!isAdmin());
+  updateSidebarAccess();
   const content=$("#content");
   content.innerHTML = ({dashboard:dashboardView,projects:projectsView,board:boardView,gantt:ganttView,report:reportView,people:peopleView,profile:profileView,skills:skillsView,users:usersView,notifications:notificationsView,chat:chatView}[state.view])();
   content.classList.remove("view-enter");void content.offsetWidth;content.classList.add("view-enter");
@@ -428,9 +472,9 @@ function pageHeading(title, text, action = "") {
   return `<div class="page-heading"><div><h1>${title}</h1><p>${text}</p></div>${action}</div>`;
 }
 function renderNoWorkspace() {
-  $("#content").innerHTML = `${pageHeading("Welcome to Orbit", "Create your first workspace to get started.")}
-    <div class="empty"><strong>Your work starts here</strong><p>A workspace keeps your projects, tasks, and team together.</p><button id="empty-workspace" class="btn primary">＋ Create workspace</button></div>`;
-  $("#empty-workspace").onclick = workspaceModal;
+  const canCreate=Boolean(state.user?.is_system_admin);
+  $("#content").innerHTML = canCreate?`${pageHeading("Welcome to Orbit", "Create your first workspace to get started.")}<div class="empty"><strong>Your work starts here</strong><p>A workspace keeps your projects, tasks, and team together.</p><button id="empty-workspace" class="btn primary">＋ Create workspace</button></div>`:`${pageHeading("No workspace found", "Your account is active, but you are not currently assigned to a workspace project or team.")}<div class="empty"><strong>No workspace access yet</strong><p>An administrator can add you to a workspace and allocate you to a team or project. You can still complete and maintain your profile.</p><button id="open-profile-without-workspace" class="btn primary">Open my profile</button></div>`;
+  if(canCreate)$("#empty-workspace").onclick=workspaceModal;else $("#open-profile-without-workspace").onclick=()=>navigate("profile");
 }
 function dashboardView() {
   const d = state.dashboard || {projects:0,active_projects:0,tasks:0,completed_tasks:0,overdue_tasks:0,completion_percent:0};
@@ -627,12 +671,19 @@ function profileView(){
   if(p.professional_title&&!state.designations.some(item=>item.name===p.professional_title))designationOptions.push([p.professional_title,p.professional_title]);
   const departmentOptions=state.departments.map(item=>[item.name,item.name]);
   if(p.department&&!state.departments.some(item=>item.name===p.department))departmentOptions.push([p.department,p.department]);
+  const experience=experienceElapsed(p.experience_start_date);
   return `${pageHeading("My profile","Keep your personal and professional information up to date.")}
   <div class="profile-layout"><aside class="panel profile-summary"><div id="profile-photo-preview" class="profile-photo ${p.profile_image?"has-photo":""}" style="${p.profile_image?`background-image:url('${esc(p.profile_image)}')`:""}">${p.profile_image?"":esc(initials)}</div><h2>${esc(p.name||state.user.name)}</h2><p>${esc(p.professional_title||"Designation not assigned")}</p><span>${esc(p.email||state.user.email)}</span><div class="profile-completion ${completion===100?"complete":""}"><div><strong>${completion}%</strong><span>Profile complete</span></div><div class="profile-completion-track"><i style="width:${completion}%"></i></div><small>${completion===100?"Eligible for team allocation.":`Complete your profile before team allocation. Missing: ${esc(missing.join(", "))}`}</small></div><div class="profile-project-stat"><strong>${p.project_count||0}</strong><small>Projects worked on</small></div><div class="profile-skills">${skills.map(skill=>`<span>${esc(skill)}</span>`).join("")||"<small>Add skills to complete your profile.</small>"}</div><div class="profile-history"><h3>Project history</h3>${(p.projects||[]).map(name=>`<div><span class="project-icon">${esc(name[0]?.toUpperCase()||"P")}</span>${esc(name)}</div>`).join("")||"<small>No project history yet.</small>"}</div></aside>
-  <section class="panel profile-editor"><form id="profile-form"><h3>Profile photo</h3><div class="profile-photo-actions"><label class="btn" for="profile-image-input">Choose image</label><input id="profile-image-input" type="file" accept="image/png,image/jpeg,image/webp" hidden><button id="remove-profile-image" type="button" class="btn">Remove</button><small>PNG, JPG or WebP · minimum 128 × 128 px · 512 × 512 px recommended · maximum 2 MB.</small><small id="profile-image-error" class="image-upload-error hidden" role="alert"></small></div><h3>Personal details</h3><div class="form-grid">${field("name","Full name","text","Your full name",true,false,p.name||state.user.name)}${field("phone","Phone","tel","Phone number",false,false,p.phone)}${field("location","Location","text","City, country",false,false,p.location)}${field("bio","About me","textarea","A short introduction",false,true,p.bio)}<h3 class="profile-form-heading">Professional details</h3>${selectField("professional_title","Professional title · Designation",designationOptions,p.professional_title,"Admin must assign designation")}${selectField("department","Department",departmentOptions,p.department,"Admin must assign department")}<p class="admin-controlled-note">Designation and department can only be changed by an administrator.</p>${field("years_experience","Years of experience","number","0",false,false,p.years_experience)}${field("skills","Skills","textarea","One skill per line or comma separated",false,true,p.skills)}${field("achievements","Achievements","textarea","Awards, certifications and professional milestones",false,true,p.achievements)}</div><div id="profile-error" class="form-error hidden"></div><div class="modal-actions"><button class="btn primary" type="submit">Save profile</button></div></form></section></div>`;
+  <section class="panel profile-editor"><form id="profile-form"><h3>Profile photo</h3><div class="profile-photo-actions"><label class="btn" for="profile-image-input">Choose image</label><input id="profile-image-input" type="file" accept="image/png,image/jpeg,image/webp" hidden><button id="remove-profile-image" type="button" class="btn">Remove</button><small>PNG, JPG or WebP · minimum 128 × 128 px · 512 × 512 px recommended · maximum 2 MB.</small><small id="profile-image-error" class="image-upload-error hidden" role="alert"></small></div><h3>Personal details</h3><div class="form-grid">${field("name","Full name","text","Your full name",true,false,p.name||state.user.name)}${field("phone","Phone (10 digits)","tel","9876543210",true,false,p.phone)}${field("location_city","City","text","City",true,false,p.location_city||p.location)}${field("location_state","State","text","State",true,false,p.location_state)}${field("location_country","Country","text","Country",true,false,p.location_country)}<label class="field full">About me<textarea name="bio" maxlength="300" placeholder="A short introduction" required>${esc(p.bio||"")}</textarea><small><span id="bio-count">${(p.bio||"").length}</span>/300 characters</small></label><h3 class="profile-form-heading">Professional details</h3>${selectField("professional_title","Professional title · Designation",designationOptions,p.professional_title,"Admin must assign designation")}${selectField("department","Department",departmentOptions,p.department,"Admin must assign department")}<p class="admin-controlled-note">Designation and department can only be changed by an administrator.</p><label class="field">Experience start date<input name="experience_start_date" type="date" max="${new Date().toISOString().slice(0,10)}" value="${esc(p.experience_start_date||"")}" required><small id="experience-elapsed">${esc(experience)}</small></label>${field("skills","Skills","textarea","One skill per line or comma separated",true,true,p.skills)}${field("achievements","Achievements · comma separated","textarea","Awards, certifications and professional milestones",true,true,p.achievements)}</div><div id="profile-error" class="form-error hidden"></div><div class="modal-actions"><button class="btn primary" type="submit">Save profile</button></div></form></section></div>`;
 }
+function experienceElapsed(value){if(!value)return "Select your professional start date";const start=new Date(`${value}T00:00:00`),today=new Date();if(start>today)return "Start date cannot be in the future";let years=today.getFullYear()-start.getFullYear(),months=today.getMonth()-start.getMonth(),days=today.getDate()-start.getDate();if(days<0){months--;days+=new Date(today.getFullYear(),today.getMonth(),0).getDate()}if(months<0){years--;months+=12}return `${years} year${years===1?"":"s"}, ${months} month${months===1?"":"s"}, ${days} day${days===1?"":"s"}`}
 function bindProfileView(){
   const form=$("#profile-form");if(!form)return;
+  form.noValidate=true;
+  const bio=form.elements.bio,bioCount=$("#bio-count");bio.required=false;bio.closest('label').firstChild.textContent='About me (optional)';bio.oninput=()=>bioCount.textContent=bio.value.length;
+  form.elements.skills.required=true;form.elements.skills.closest('label').firstChild.textContent='Skills';
+  form.elements.achievements.required=false;form.elements.achievements.closest('label').firstChild.textContent='Achievements · comma separated (optional)';
+  const experienceInput=form.elements.experience_start_date;experienceInput.onchange=()=>$("#experience-elapsed").textContent=experienceElapsed(experienceInput.value);
   ['professional_title','department'].forEach(name=>{const input=$(`[name="${name}"]`,form);if(input){input.disabled=true;input.title="Only an administrator can change this field"}});
   enhanceSkillInputs(form);
   let profileImage=state.profile?.profile_image||null;
@@ -654,7 +705,8 @@ function bindProfileView(){
   };
   if(profileImage)inspectImage(profileImage).catch(()=>{profileImage=null;resetImagePreview();showImageError("Your saved profile image could not be loaded. Please choose another image.")});
   $("#remove-profile-image").onclick=()=>{profileImage=null;imageInput.value="";clearImageError();resetImagePreview()};
-  form.onsubmit=async event=>{event.preventDefault();const button=$('button[type="submit"]',form),error=$("#profile-error");button.disabled=true;try{const data=formData(form);data.profile_image=profileImage;if(data.years_experience!==null)data.years_experience=Number(data.years_experience);state.profile=await api("/auth/profile",{method:"PUT",body:JSON.stringify(data)});state.user.name=state.profile.name;$("#user-name").textContent=state.profile.name;$("#user-designation").textContent=[state.profile.professional_title,state.profile.department].filter(Boolean).join(" · ")||"Designation not assigned";$("#user-avatar").textContent=state.profile.profile_image?"":state.profile.name.slice(0,2).toUpperCase();$("#user-avatar").style.backgroundImage=state.profile.profile_image?`url("${state.profile.profile_image}")`:"";$("#user-avatar").classList.toggle("has-photo",Boolean(state.profile.profile_image));render();toast("Profile updated")}catch(err){error.textContent=err.message;error.classList.remove("hidden")}finally{button.disabled=false}};
+  form.onsubmit=async event=>{event.preventDefault();const button=$('button[type="submit"]',form),error=$("#profile-error");button.disabled=true;try{const data=formData(form);data.profile_image=profileImage;data.location=[data.location_city,data.location_state,data.location_country].filter(Boolean).join(", ");data.years_experience=data.experience_start_date?Math.max(0,Math.floor((Date.now()-new Date(`${data.experience_start_date}T00:00:00`))/31557600000)):null;state.profile=await api("/auth/profile",{method:"PUT",body:JSON.stringify(data)});state.user.name=state.profile.name;syncUserChrome();closeModal();render();toast(profileOnboardingRequired()?"Profile saved — complete the remaining fields":"Profile completed") }catch(err){error.textContent=err.message;error.classList.remove("hidden")}finally{button.disabled=false}};
+  form.addEventListener('submit',event=>{clearFieldErrors(form);clearImageError();let valid=true;const required=[['name','Full name is required and must contain at least 2 characters.',value=>value.trim().length>=2],['phone','Phone must contain exactly 10 digits.',value=>/^\d{10}$/.test(value.trim())],['location_city','City is required.',value=>Boolean(value.trim())],['location_state','State is required.',value=>Boolean(value.trim())],['location_country','Country is required.',value=>Boolean(value.trim())],['experience_start_date','Experience start date is required.',value=>Boolean(value)&&new Date(`${value}T00:00:00`)<=new Date()]];required.forEach(([name,message,check])=>{const input=form.elements[name];if(!check(input.value)){fieldError(input,message);valid=false}});const skills=form.elements.skills;if(!skills.value.trim()){fieldError(skills.nextElementSibling?.querySelector('input')||skills,'Add at least one skill.');valid=false}if(bio.value.length>300){fieldError(bio,'About me must not exceed 300 characters.');valid=false}if(!profileImage){showImageError('Choose a profile image before saving.');valid=false}if(!valid){event.preventDefault();event.stopImmediatePropagation();form.querySelector('.input-invalid')?.focus()}},true);
 }
 function skillsView(){
   if(!isAdmin())return emptyMini("Admin access required","Only workspace admins can search skills and assign work.");
@@ -664,41 +716,80 @@ function skillMemberCards(members){return members.length?members.map(member=>{co
 function bindSkillsView(){const search=$("#skills-search"),filter=$("#skills-filter");if(!search)return;const apply=()=>{const query=search.value.trim().toLowerCase(),skill=filter.value.toLowerCase();const members=state.skillMembers.filter(member=>(!query||member.name.toLowerCase().includes(query)||member.email.toLowerCase().includes(query)||member.skills.some(item=>item.toLowerCase().includes(query)))&&(!skill||member.skills.some(item=>item.toLowerCase()===skill)));$("#skills-directory").innerHTML=skillMemberCards(members);bindSkillAssignButtons()};search.oninput=apply;filter.onchange=apply;bindSkillAssignButtons()}
 function bindSkillAssignButtons(){$$('[data-skill-assign]').forEach(button=>button.onclick=()=>skillTaskAssignModal(state.skillMembers.find(member=>member.user_id===Number(button.dataset.skillAssign))))}
 function skillTaskAssignModal(member){const projects=state.projects.filter(project=>member.project_ids.includes(project.id));let projectTasks=[];modal(formShell("Assign member to task",`Choose a project task for ${esc(member.name)}.`,`${selectField("project_id","Project",projects.map(project=>[project.id,project.name]))}<label class="field full">Task<select name="task_id" id="skill-task-select" required><option value="">Select a project first</option></select></label>`,"Assign task"),()=>{const projectSelect=$('[name="project_id"]'),taskSelect=$("#skill-task-select");const load=async()=>{taskSelect.innerHTML='<option value="">Loading tasks…</option>';try{projectTasks=await api(`/projects/${projectSelect.value}/tasks`);taskSelect.innerHTML=`<option value="">Select task</option>${projectTasks.map(task=>`<option value="${task.id}">${esc(task.title)}</option>`).join("")}`}catch(err){taskSelect.innerHTML='<option value="">Could not load tasks</option>';toast(err.message,true)}};projectSelect.onchange=load;if(projectSelect.value)load();$("#modal-form").onsubmit=async event=>submitForm(event,async data=>{const task=projectTasks.find(item=>item.id===Number(data.task_id));if(!task)throw new Error("Select a task");const assignee_ids=[...new Set([...(task.assignee_ids||[]),member.user_id])];await api(`/tasks/${task.id}`,{method:"PATCH",body:JSON.stringify({assignee_ids})});if(state.project?.id===Number(data.project_id))await loadProject();toast(`${member.name} assigned to ${task.title}`)})})}
+const USERS_PAGE_SIZE=10;
+function userDirectoryPageRows(users){const pages=Math.max(1,Math.ceil(users.length/USERS_PAGE_SIZE));state.userDirectoryPage=Math.min(Math.max(1,state.userDirectoryPage),pages);const start=(state.userDirectoryPage-1)*USERS_PAGE_SIZE;return users.slice(start,start+USERS_PAGE_SIZE)}
+function userDirectoryPagination(users){const pages=Math.ceil(users.length/USERS_PAGE_SIZE);if(pages<=1)return '';return `<div class="panel-pagination users-pagination"><button type="button" data-users-page="${state.userDirectoryPage-1}" ${state.userDirectoryPage===1?"disabled":""}>Previous</button><span>Page ${state.userDirectoryPage} of ${pages} · ${users.length} users</span><button type="button" data-users-page="${state.userDirectoryPage+1}" ${state.userDirectoryPage===pages?"disabled":""}>Next</button></div>`}
 function usersView(){
   if(!isAdmin())return emptyMini("Admin access required","Only workspace admins can manage users.");
-  state.userDirectory.filter(user=>!user.is_active||user.completion_percent===100).forEach(user=>state.selectedProfileUsers.delete(user.user_id));
-  return `${pageHeading("Users","Manage registered accounts, profile readiness and workspace access.",`<span class="member-count">${state.userDirectory.length}</span>`)}<div class="users-toolbar"><input id="user-search" placeholder="Search by name or email"><select id="user-department-filter"><option value="">All departments</option>${state.departments.map(item=>`<option value="${esc(item.name)}">${esc(item.name)}</option>`).join("")}</select><select id="user-designation-filter"><option value="">All designations</option>${state.designations.map(item=>`<option value="${esc(item.name)}">${esc(item.name)}</option>`).join("")}</select><select id="user-project-filter"><option value="">All projects</option>${state.projects.map(item=>`<option value="${esc(item.name)}">${esc(item.name)}</option>`).join("")}</select></div><div class="user-bulk-actions"><span><strong id="selected-profile-count">${state.selectedProfileUsers.size}</strong> selected</span><button id="send-profile-reminder" class="btn primary" ${state.selectedProfileUsers.size?"":"disabled"}>Send profile reminder</button></div><section class="panel users-table-wrap"><table class="users-table"><thead><tr><th class="select-cell"><input id="select-all-profile-users" type="checkbox" aria-label="Select all incomplete profiles"></th><th>User</th><th>Profile</th><th>Department</th><th>Designation</th><th>Project allocations</th><th>Access</th><th>Status</th><th>Actions</th></tr></thead><tbody id="users-table-body">${userDirectoryRows(state.userDirectory)}</tbody></table></section>`;
+  state.userDirectory.filter(user=>!user.is_active).forEach(user=>state.selectedProfileUsers.delete(user.user_id));
+  state.filteredUserDirectory=state.userDirectory;const pageUsers=userDirectoryPageRows(state.filteredUserDirectory);
+  return `${pageHeading("Users","Manage registered accounts, profile readiness and workspace access.",`<span class="member-count">${state.userDirectory.length}</span>`)}<div class="users-toolbar"><input id="user-search" placeholder="Search by name or email"><select id="user-department-filter"><option value="">All departments</option>${state.departments.map(item=>`<option value="${esc(item.name)}">${esc(item.name)}</option>`).join("")}</select><select id="user-designation-filter"><option value="">All designations</option>${state.designations.map(item=>`<option value="${esc(item.name)}">${esc(item.name)}</option>`).join("")}</select><select id="user-project-filter"><option value="">All projects</option>${state.projects.map(item=>`<option value="${esc(item.name)}">${esc(item.name)}</option>`).join("")}</select><button id="reset-user-filters" class="btn users-reset" type="button">Reset</button></div><div class="user-bulk-actions"><span><strong id="selected-profile-count">${state.selectedProfileUsers.size}</strong> selected</span><button id="send-profile-reminder" class="btn">Send profile reminders</button><button id="send-custom-announcement" class="btn primary">Custom announcement</button></div><section class="panel users-table-wrap"><table class="users-table"><thead><tr><th class="select-cell"><input id="select-all-profile-users" type="checkbox" aria-label="Select active users"></th><th>User</th><th>Profile</th><th>Department</th><th>Designation</th><th>Project allocations</th><th>Access</th><th>Status</th><th>Actions</th></tr></thead><tbody id="users-table-body">${userDirectoryRows(pageUsers)}</tbody></table><div id="users-pagination">${userDirectoryPagination(state.filteredUserDirectory)}</div></section>`;
 }
-function userDirectoryActions(user){if(!state.workspace)return '<span class="readonly-pill">Workspace required</span>';const edit=`<button data-directory-profile="${user.user_id}">Edit profile</button>`,remove=user.user_id!==state.user.id?`<button class="remove-action" data-directory-delete="${user.user_id}">Delete</button>`:"";return `${edit}${remove}`}
-function userDirectoryAccess(user){if(!state.workspace)return '<span class="badge">Global account</span>';if(!user.is_active)return '<span class="badge pending">Pending approval</span>';if(!user.membership_id)return '<span class="badge">Not added</span>';return `<div class="role-access"><span class="badge ${user.role}">${pretty(user.role)}</span>${user.user_id!==state.user.id?`<button data-edit-access="${user.user_id}" title="Change workspace role">Edit</button>`:""}</div>`}
-function userDirectoryStatus(user){if(!state.workspace)return `<span class="badge ${user.is_active?"active":"pending"}">${user.is_active?"Active":"Pending"}</span>`;if(!user.is_active)return `<button class="approve-action" data-directory-approve="${user.user_id}">Approve</button>`;if(!user.membership_id)return `<button class="add-member-action" data-directory-add="${user.user_id}"><span>＋</span> Add member</button>`;if(user.user_id===state.user.id)return `<span class="status-self">Current user</span>`;return `<label class="access-switch" title="${user.membership_is_active?"Deactivate":"Activate"} workspace access"><input type="checkbox" data-directory-access="${user.user_id}" ${user.membership_is_active?"checked":""}><span></span><em>${user.membership_is_active?"Active":"Inactive"}</em></label>`}
+function userDirectoryActions(user){const edit=`<button data-directory-profile="${user.user_id}">Edit profile</button>`,remove=user.user_id!==state.user.id?`<button class="remove-action" data-directory-delete="${user.user_id}">Delete</button>`:"";return `${edit}${remove}`}
+function userDirectoryAccess(user){if(!user.is_member)return '<span class="badge">Not Added</span>';const role=user.is_system_admin?"admin":"member";return `<div class="role-access"><span class="badge ${role}">${pretty(role)}</span>${user.user_id!==state.user.id?`<button data-edit-access="${user.user_id}" title="Edit role, department and designation">Edit</button>`:""}</div>`}
+function userDirectoryStatus(user){if(!user.is_active&&!user.is_member)return `<button class="approve-action" data-directory-approve="${user.user_id}">Approval pending</button>`;if(!user.is_member)return `<button class="add-member-action" data-directory-add="${user.user_id}"><span>＋</span> Add member</button>`;if(user.user_id===state.user.id)return `<span class="status-self">Current user</span>`;return `<label class="access-switch" title="${user.is_active?"Deactivate":"Activate"} account"><input type="checkbox" data-directory-access="${user.user_id}" ${user.is_active?"checked":""}><span></span><em>${user.is_active?"Active":"Inactive"}</em></label>`}
 function userDirectoryRows(users){return users.length?users.map(user=>{const completion=user.completion_percent||0,selectable=Boolean(state.workspace)&&user.is_active&&completion<100;return `<tr class="${user.is_active?"":"pending-user"}"><td class="select-cell"><input type="checkbox" data-profile-select="${user.user_id}" aria-label="Select ${esc(user.name)}" ${state.selectedProfileUsers.has(user.user_id)?"checked":""} ${selectable?"":"disabled"}></td><td><div class="directory-user">${avatar(user)}<span><strong>${esc(user.name)}</strong><small>${esc(user.email)}</small></span></div></td><td><div class="directory-completion ${completion===100?"complete":""}"><span><strong>${completion}%</strong><small>${completion===100?"Ready":"Incomplete"}</small></span><i><b style="width:${completion}%"></b></i></div></td><td>${esc(user.department||"Not set")}</td><td>${esc(user.professional_title||"Not set")}</td><td><div class="directory-projects">${user.projects.length?user.projects.map(project=>`<span>${esc(project)}</span>`).join(""):"<small>No allocations</small>"}</div></td><td>${userDirectoryAccess(user)}</td><td>${userDirectoryStatus(user)}</td><td><div class="directory-actions">${userDirectoryActions(user)}</div></td></tr>`}).join(""):`<tr><td colspan="9" class="users-empty">No users match these filters.</td></tr>`}
-function filterUserDirectory(){const query=$("#user-search").value.trim().toLowerCase(),department=$("#user-department-filter").value,designation=$("#user-designation-filter").value,project=$("#user-project-filter").value;const users=state.userDirectory.filter(user=>(!query||user.name.toLowerCase().includes(query)||user.email.toLowerCase().includes(query))&&(!department||user.department===department)&&(!designation||user.professional_title===designation)&&(!project||user.projects.includes(project)));$("#users-table-body").innerHTML=userDirectoryRows(users);bindUserDirectoryActions()}
-function addDirectoryUserModal(user){modal(formShell("Add workspace user",`Add ${esc(user.name)} (${esc(user.email)}) to this workspace.`,selectField("role","Workspace role",["member","admin"],"member"),"Add user"),()=>$("#modal-form").onsubmit=async event=>submitForm(event,async data=>{data.email=user.email;const member=await api(`/workspaces/${state.workspace.id}/members`,{method:"POST",body:JSON.stringify(data)});state.members.push(member);state.userDirectory=state.userDirectory.map(item=>item.user_id===user.user_id?{...item,membership_id:member.id,membership_is_active:true,role:member.role}:item);toast("User added and activated")}))}
+function renderUserDirectoryResults(users,resetPage=false){if(resetPage)state.userDirectoryPage=1;state.filteredUserDirectory=users;const rows=userDirectoryPageRows(users);$("#users-table-body").innerHTML=userDirectoryRows(rows);$("#users-pagination").innerHTML=userDirectoryPagination(users);bindUserDirectoryActions()}
+function filterUserDirectory(){const query=$("#user-search").value.trim().toLowerCase(),department=$("#user-department-filter").value,designation=$("#user-designation-filter").value,project=$("#user-project-filter").value;const users=state.userDirectory.filter(user=>(!query||user.name.toLowerCase().includes(query)||user.email.toLowerCase().includes(query))&&(!department||user.department===department)&&(!designation||user.professional_title===designation)&&(!project||user.projects.includes(project)));renderUserDirectoryResults(users,true)}
+function addDirectoryUserModal(user){
+  if(!state.departments.length||!state.designations.length){toast("Create a department and designation before adding a member",true);return}
+  modal(formShell(user.is_member?"Edit access":"Add member",`Assign ${esc(user.name)} a role, department, and designation.`,`${selectField("role","Role",[["member","Member"],["admin","Admin"]],user.is_system_admin?"admin":"member")}${selectField("department","Department",state.departments.map(item=>[item.name,item.name]),user.department||"","Select department")}<label class="field">Designation<select name="professional_title" id="new-member-designation" required disabled><option value="">Select department first</option></select></label>`,user.is_member?"Save assignment":"Add member"),()=>{
+    const form=$("#modal-form"),department=form.elements.department,designation=$("#new-member-designation");
+    let selectedDesignation=user.professional_title;const populate=()=>{const choices=state.designations.filter(item=>item.department_name===department.value);designation.innerHTML=`<option value="">Select designation</option>${choices.map(item=>`<option value="${esc(item.name)}" ${item.name===selectedDesignation?"selected":""}>${esc(item.name)}</option>`).join("")}`;designation.disabled=!choices.length};department.onchange=()=>{selectedDesignation=null;populate()};populate();
+    form.onsubmit=async event=>submitForm(event,async data=>{const updated=await api(`/admin/users/${user.user_id}/member`,{method:"PATCH",body:JSON.stringify(data)});state.userDirectory=state.userDirectory.map(item=>item.user_id===user.user_id?{...item,...updated}:item);toast(`${updated.name} saved as ${pretty(updated.role)}`)})
+  })
+}
 function editDirectoryAccessModal(user){modal(formShell("Edit access",`Change ${esc(user.name)}'s role in this workspace.`,selectField("role","Workspace role",[["member","Member"],["admin","Admin"]],user.role),"Save access"),()=>$("#modal-form").onsubmit=async event=>submitForm(event,async data=>{const member=await api(`/workspaces/${state.workspace.id}/members/${user.membership_id}/access`,{method:"PATCH",body:JSON.stringify({role:data.role})});user.role=member.role;state.members=state.members.map(item=>item.id===member.id?member:item);toast(`${user.name} is now ${pretty(member.role)}`)}))}
 async function adminUserProfileModal(directoryUser){
   const member=state.members.find(item=>item.user_id===directoryUser.user_id);
-  try{const profile=await api(`/workspaces/${state.workspace.id}/users/${directoryUser.user_id}/profile`);modal(formShell("Edit user profile","Update profile details. The registered email address cannot be changed.",`<label class="field full">Email address<input value="${esc(profile.email)}" readonly disabled></label>${field("name","Full name","text","Full name",true,false,profile.name)}${field("phone","Phone","tel","Phone number",false,false,profile.phone)}${field("location","Location","text","City, country",false,false,profile.location)}${field("bio","About","textarea","Personal introduction",false,true,profile.bio)}${selectField("professional_title","Professional title · Designation",state.designations.map(item=>[item.name,item.name]),profile.professional_title,"Select designation")}${selectField("department","Department",state.departments.map(item=>[item.name,item.name]),profile.department,"Select department")}${field("years_experience","Years of experience","number","0",false,false,profile.years_experience)}${field("skills","Skills","textarea","One skill per line or comma separated",false,true,profile.skills)}${field("achievements","Achievements","textarea","Awards, certifications and milestones",false,true,profile.achievements)}`,"Save profile"),()=>$("#modal-form").onsubmit=async event=>submitForm(event,async data=>{if(data.years_experience!==null)data.years_experience=Number(data.years_experience);data.profile_image=profile.profile_image;const updated=await api(`/workspaces/${state.workspace.id}/users/${directoryUser.user_id}/profile`,{method:"PUT",body:JSON.stringify(data)});state.userDirectory=state.userDirectory.map(user=>user.user_id===directoryUser.user_id?{...user,name:updated.name,professional_title:updated.professional_title,department:updated.department,completion_percent:updated.completion_percent,missing_fields:updated.missing_fields}:user);if(member)state.members=state.members.map(item=>item.id===member.id?{...item,user:{...item.user,name:updated.name},professional_title:updated.professional_title,department:updated.department}:item);if(directoryUser.user_id===state.user.id){state.user.name=updated.name;state.profile=updated}toast(`User profile updated · ${updated.completion_percent}% complete`)}))}catch(err){toast(err.message,true)}
+  try{
+    const profile=await api(`/admin/users/${directoryUser.user_id}/profile`);
+    const fields=`<label class="field full">Email address<input value="${esc(profile.email)}" readonly disabled></label>${field("name","Full name","text","Full name",true,false,profile.name)}${selectField("department","Department",state.departments.map(item=>[item.name,item.name]),profile.department,"Select department")}<label class="field">Professional title · Designation<select name="professional_title" id="admin-profile-designation" required></select></label><label class="field">Experience start date<input name="experience_start_date" type="date" max="${new Date().toISOString().slice(0,10)}" value="${esc(profile.experience_start_date||"")}"></label>${field("skills","Skills","textarea","One skill per line or comma separated",false,true,profile.skills)}`;
+    modal(formShell("Edit user profile","Administrators manage identity and professional assignment. Employees maintain their other personal details.",fields,"Save profile"),()=>{
+      const form=$("#modal-form"),department=form.elements.department,designation=$("#admin-profile-designation");
+      const populateDesignations=selected=>{const options=state.designations.filter(item=>item.department_name===department.value);designation.innerHTML=`<option value="">Select designation</option>${options.map(item=>`<option value="${esc(item.name)}" ${item.name===selected?"selected":""}>${esc(item.name)}</option>`).join("")}`;designation.disabled=!department.value||!options.length};
+      populateDesignations(profile.professional_title);department.onchange=()=>populateDesignations("");
+      form.onsubmit=async event=>submitForm(event,async data=>{const updated=await api(`/admin/users/${directoryUser.user_id}/profile`,{method:"PUT",body:JSON.stringify(data)});state.userDirectory=state.userDirectory.map(user=>user.user_id===directoryUser.user_id?{...user,name:updated.name,professional_title:updated.professional_title,department:updated.department,completion_percent:updated.completion_percent,missing_fields:updated.missing_fields}:user);if(member)state.members=state.members.map(item=>item.id===member.id?{...item,user:{...item.user,name:updated.name},professional_title:updated.professional_title,department:updated.department}:item);if(directoryUser.user_id===state.user.id){state.user.name=updated.name;state.profile=updated;syncUserChrome()}toast(`User profile updated · ${updated.completion_percent}% complete`)})
+    })
+  }catch(err){toast(err.message,true)}
 }
 function profileReminderModal(userIds){
-  if(!state.workspace){toast("Select or create a workspace before sending reminders",true);return}
   const recipients=state.userDirectory.filter(user=>userIds.includes(user.user_id));
   modal(formShell("Send profile reminder",`Compose a notification for ${recipients.length} selected user${recipients.length===1?"":"s"}.`,`<div class="field full reminder-recipients"><strong>Recipients</strong><span>${recipients.map(user=>esc(user.name)).join(", ")}</span></div>${field("title","Notification subject","text","Complete your profile",true,false,"Complete your profile")}${field("message","Custom message","textarea","Leave blank to send each user their current completion percentage and missing profile fields.",false,true)}<div class="field full reminder-compose-note"><strong>Personalized default</strong><span>If the custom message is blank, each member receives their own completion percentage, missing fields, and team-allocation requirement.</span></div>`,"Send notification"),()=>$("#modal-form").onsubmit=async event=>submitForm(event,async data=>{
-    const result=await api(`/notifications/profile-completion/${state.workspace.id}`,{method:"POST",body:JSON.stringify({user_ids:userIds,title:data.title,message:data.message})});
+    const result=await api("/notifications/profile-completion",{method:"POST",body:JSON.stringify({user_ids:userIds,title:data.title,message:data.message})});
     state.selectedProfileUsers.clear();loadNotifications().catch(()=>{});toast(`${result.sent_count} reminder${result.sent_count===1?"":"s"} sent`);
   }));
 }
+function memberProfileMissing(user){return (user.missing_fields||[]).filter(field=>field!=="Department"&&field!=="Designation")}
+async function sendAutomaticProfileReminders(){
+  const user_ids=state.userDirectory.filter(user=>user.is_active&&user.is_member&&memberProfileMissing(user).length).map(user=>user.user_id);
+  if(!user_ids.length){toast("Every member has completed their required profile details");return}
+  try{const result=await api("/notifications/profile-completion",{method:"POST",body:JSON.stringify({user_ids})});await loadNotifications();toast(`${result.sent_count} profile reminder${result.sent_count===1?"":"s"} sent`)}catch(err){toast(err.message,true)}
+}
+async function customAnnouncementModal(){
+  const selected=[...state.selectedProfileUsers],selectedUsers=state.userDirectory.filter(user=>selected.includes(user.user_id));
+  modal(formShell("Custom announcement","Send a global announcement to all active Members and Admins or selected individuals.",`${selectField("audience","Audience",[["all","All Members and Admins"],["selected",`Selected individuals (${selectedUsers.length})`]],"all")}${field("title","Announcement title","text","e.g. Office update",true)}${field("message","Message","textarea","Write your announcement",true,true)}<div class="field full reminder-compose-note"><strong>Individual recipients</strong><span>${selectedUsers.length?selectedUsers.map(user=>esc(user.name)).join(", "):"Select users in the table before choosing selected individuals."}</span></div>`,"Send announcement"),()=>{
+    const form=$("#modal-form");form.elements.audience.onchange=()=>{if(form.elements.audience.value==="selected"&&!selectedUsers.length){form.elements.audience.value="all";toast("Select at least one active user first",true)}};
+    form.onsubmit=async event=>submitForm(event,async data=>{
+      const result=await api("/admin/announcements",{method:"POST",body:JSON.stringify({audience:data.audience,user_ids:data.audience==="selected"?selectedUsers.map(user=>user.user_id):[],title:data.title,message:data.message})});
+      state.selectedProfileUsers.clear();toast(`Announcement sent to ${result.sent_count} user${result.sent_count===1?"":"s"}`)
+    })
+  })
+}
 function bindUserDirectoryActions(){
-  const updateSelection=()=>{const count=$("#selected-profile-count"),send=$("#send-profile-reminder");if(count)count.textContent=state.selectedProfileUsers.size;if(send)send.disabled=!state.selectedProfileUsers.size};
+  $$('[data-users-page]').forEach(button=>button.onclick=()=>{state.userDirectoryPage=Number(button.dataset.usersPage);renderUserDirectoryResults(state.filteredUserDirectory)});
+  $$('[data-profile-select]').forEach(input=>{const user=state.userDirectory.find(item=>item.user_id===Number(input.dataset.profileSelect));input.disabled=!user?.is_active||!user?.is_member});
+  const updateSelection=()=>{const count=$("#selected-profile-count");if(count)count.textContent=state.selectedProfileUsers.size};
   $$('[data-profile-select]').forEach(input=>input.onchange=()=>{const id=Number(input.dataset.profileSelect);if(input.checked)state.selectedProfileUsers.add(id);else state.selectedProfileUsers.delete(id);updateSelection()});
-  const selectAll=$("#select-all-profile-users");if(selectAll)selectAll.onchange=()=>{$$('[data-profile-select]:not(:disabled)').forEach(input=>{input.checked=selectAll.checked;const id=Number(input.dataset.profileSelect);if(selectAll.checked)state.selectedProfileUsers.add(id);else state.selectedProfileUsers.delete(id)});updateSelection()};
-  const send=$("#send-profile-reminder");if(send)send.onclick=()=>{const user_ids=[...state.selectedProfileUsers];if(user_ids.length)profileReminderModal(user_ids)};
-  $$('[data-directory-approve]').forEach(button=>button.onclick=async()=>{const user=state.userDirectory.find(item=>item.user_id===Number(button.dataset.directoryApprove));if(!user)return;try{await api(`/workspaces/${state.workspace.id}/users/${user.user_id}/approve`,{method:"PATCH"});user.is_active=true;render();toast(`${user.name} can now sign in`)}catch(err){toast(err.message,true)}});
-  $$('[data-directory-access]').forEach(button=>button.onclick=async()=>{const user=state.userDirectory.find(item=>item.user_id===Number(button.dataset.directoryAccess));if(!user)return;const next=!user.membership_is_active;try{const member=await api(`/workspaces/${state.workspace.id}/members/${user.membership_id}/access`,{method:"PATCH",body:JSON.stringify({is_active:next})});user.membership_is_active=member.is_active;state.members=state.members.map(item=>item.id===member.id?member:item);render();toast(`${user.name} is now ${next?"active":"inactive"}`)}catch(err){toast(err.message,true)}});
-  $$('[data-edit-access]').forEach(button=>button.onclick=()=>editDirectoryAccessModal(state.userDirectory.find(item=>item.user_id===Number(button.dataset.editAccess))));
+  const selectAll=$("#select-all-profile-users");if(selectAll){const eligible=state.filteredUserDirectory.filter(user=>user.is_active&&user.is_member),selectedCount=eligible.filter(user=>state.selectedProfileUsers.has(user.user_id)).length;selectAll.checked=eligible.length>0&&selectedCount===eligible.length;selectAll.indeterminate=selectedCount>0&&selectedCount<eligible.length;selectAll.disabled=!eligible.length;selectAll.onchange=()=>{eligible.forEach(user=>{if(selectAll.checked)state.selectedProfileUsers.add(user.user_id);else state.selectedProfileUsers.delete(user.user_id)});renderUserDirectoryResults(state.filteredUserDirectory);updateSelection()}};
+  $("#send-profile-reminder")?.addEventListener("click",sendAutomaticProfileReminders);
+  $("#send-custom-announcement")?.addEventListener("click",customAnnouncementModal);
+  $$('[data-directory-approve]').forEach(button=>button.onclick=async()=>{const user=state.userDirectory.find(item=>item.user_id===Number(button.dataset.directoryApprove));if(!user)return;try{const updated=await api(`/admin/users/${user.user_id}/approve`,{method:"PATCH"});Object.assign(user,updated);render();toast(`${user.name} can now sign in`)}catch(err){toast(err.message,true)}});
+  $$('[data-directory-access]').forEach(button=>button.onclick=async()=>{const user=state.userDirectory.find(item=>item.user_id===Number(button.dataset.directoryAccess));if(!user)return;const next=!user.is_active;try{const updated=await api(`/admin/users/${user.user_id}/access?is_active=${next}`,{method:"PATCH"});Object.assign(user,updated);render();toast(`${user.name} is now ${next?"active":"inactive"}`)}catch(err){render();toast(err.message,true)}});
+  $$('[data-edit-access]').forEach(button=>button.onclick=()=>addDirectoryUserModal(state.userDirectory.find(item=>item.user_id===Number(button.dataset.editAccess))));
   $$("[data-directory-add]").forEach(button=>button.onclick=()=>addDirectoryUserModal(state.userDirectory.find(user=>user.user_id===Number(button.dataset.directoryAdd))));
   $$("[data-directory-profile]").forEach(button=>button.onclick=()=>adminUserProfileModal(state.userDirectory.find(user=>user.user_id===Number(button.dataset.directoryProfile))));
-  $$("[data-directory-delete]").forEach(button=>button.onclick=async()=>{const user=state.userDirectory.find(item=>item.user_id===Number(button.dataset.directoryDelete));if(!user)return;const confirmation=prompt(`Delete ${user.name} and all project allocations? Type their email to confirm:`);if(confirmation!==user.email){if(confirmation!==null)toast("Email confirmation did not match",true);return}try{await api(`/workspaces/${state.workspace.id}/users/${user.user_id}`,{method:"DELETE"});state.userDirectory=state.userDirectory.filter(item=>item.user_id!==user.user_id);state.members=state.members.filter(item=>item.user_id!==user.user_id);state.teamMembers=state.teamMembers.filter(item=>item.user_id!==user.user_id);render();toast("User deleted")}catch(err){toast(err.message,true)}})
+  $$("[data-directory-delete]").forEach(button=>button.onclick=async()=>{const user=state.userDirectory.find(item=>item.user_id===Number(button.dataset.directoryDelete));if(!user)return;const confirmation=prompt(`Delete ${user.name} and all project allocations? Type their email to confirm:`);if(confirmation!==user.email){if(confirmation!==null)toast("Email confirmation did not match",true);return}try{await api(`/admin/users/${user.user_id}`,{method:"DELETE"});state.userDirectory=state.userDirectory.filter(item=>item.user_id!==user.user_id);state.members=state.members.filter(item=>item.user_id!==user.user_id);state.teamMembers=state.teamMembers.filter(item=>item.user_id!==user.user_id);render();toast("User deleted")}catch(err){toast(err.message,true)}})
 }
 function openChatMessageMenu(trigger) {
   const messageId=Number(trigger.dataset.deleteMessage),message=state.chatMessages.find(item=>item.id===messageId);
@@ -819,6 +910,7 @@ function bindView() {
   $("#export-gantt-pdf")?.addEventListener("click",exportGanttPdf);
   bindProfileView();
   ["#user-search","#user-department-filter","#user-designation-filter","#user-project-filter"].forEach(selector=>$(selector)?.addEventListener(selector==="#user-search"?"input":"change",filterUserDirectory));
+  $("#reset-user-filters")?.addEventListener("click",()=>{state.selectedProfileUsers.clear();state.userDirectoryPage=1;state.filteredUserDirectory=state.userDirectory;render();toast("User filters and selections reset")});
   bindUserDirectoryActions();
   bindBoardDragDrop();
   $("#project-search")?.addEventListener("input", filterProjects); $("#project-filter")?.addEventListener("change", filterProjects);
@@ -929,19 +1021,20 @@ function bindBoardDragDrop() {
   });
 }
 
-function workspaceModal() { $("#workspace-menu").classList.add("hidden"); modal(formShell("Create workspace","A shared home for your projects and team.",`
+function workspaceModal() { if(!state.user?.is_system_admin){toast("Only the system administrator can create workspaces",true);return}$("#workspace-menu").classList.add("hidden"); modal(formShell("Create workspace","A shared home for your projects and team.",`
   ${field("name","Workspace name","text","e.g. Product team",true)}${field("description","Description","textarea","What will your team work on?")}`,"Create workspace"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
     const w=await api("/workspaces",{method:"POST",body:JSON.stringify(data)});state.workspaces.unshift(w);state.workspace=w;localStorage.setItem("orbit_workspace",w.id);updateWorkspaceUI();await loadWorkspace();toast("Workspace created");
   }));}
 function workspaceSettingsModal(){
   $("#workspace-menu").classList.add("hidden");
+  if(!state.user?.is_system_admin){toast("Only the system administrator can update or delete workspaces",true);return}
   const workspace=activeWorkspace();
   if(!workspace)return;
   modal(`<h2>Workspace settings</h2><p class="subtitle">Manage ${esc(workspace.name)}.</p>
     <form id="workspace-edit-form"><div class="form-grid">${field("name","Workspace name","text","Workspace name",true,false,workspace.name)}${field("description","Description","textarea","What does this workspace contain?","",true,workspace.description)}</div>
     <div class="modal-actions"><button class="btn primary">Save workspace</button></div></form>
     <h3 class="settings-section-title">Danger zone</h3>
-    ${workspace.owner_id===state.user.id?`<div class="danger-zone"><h3>Delete workspace</h3><p>This permanently deletes its projects, sprints, tasks, comments, teams, and board settings.</p><label class="danger-confirm"><span>Type <strong>${esc(workspace.name)}</strong> to confirm</span><input id="delete-workspace-name" type="text" autocomplete="off" placeholder="${esc(workspace.name)}" aria-describedby="delete-workspace-help"></label><small id="delete-workspace-help">The workspace name must match exactly.</small><button id="delete-workspace" type="button" class="btn danger" disabled>Delete workspace permanently</button></div>`:`<div class="danger-zone"><h3>Workspace deletion</h3><p>Only the workspace owner can permanently delete this workspace.</p></div>`}
+    <div class="danger-zone"><h3>Delete workspace</h3><p>This permanently deletes its projects, sprints, tasks, comments, teams, and board settings.</p><label class="danger-confirm"><span>Type <strong>${esc(workspace.name)}</strong> to confirm</span><input id="delete-workspace-name" type="text" autocomplete="off" placeholder="${esc(workspace.name)}" aria-describedby="delete-workspace-help"></label><small id="delete-workspace-help">The workspace name must match exactly.</small><button id="delete-workspace" type="button" class="btn danger" disabled>Delete workspace permanently</button></div>
     <div id="modal-error" class="form-error hidden"></div>`,()=>{
       $("#workspace-edit-form").onsubmit=async event=>{
         event.preventDefault();const error=$("#modal-error");
@@ -1112,9 +1205,9 @@ async function memberModal(){
   }catch(err){toast(err.message,true)}
 }
 function teamModal(team=null){
-  const managers=state.userDirectory.filter(user=>user.is_active);
+  const managers=state.userDirectory.filter(user=>user.is_active&&user.is_member&&user.professional_title&&(user.completion_percent||0)>=50);
   if(!managers.length||!state.designations.length){toast("Add a designation and approve at least one registered user before creating a team",true);return}
-  modal(formShell(team?"Edit team":"Create a team",team?"Update the team, manager and purpose.":"Every team requires a designated manager.",`${field("name","Team name","text","e.g. Design",true,false,team?.name)}${field("description","Description","textarea","What does this team own?",false,true,team?.description)}${selectField("manager_user_id","Team manager",managers.map(user=>[user.user_id,user.name]),team?.manager_user_id||state.user.id)}${selectField("manager_designation","Manager designation",state.designations.map(item=>[item.name,item.name]),team?.manager_designation||"")}`,team?"Save changes":"Create team"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{data.manager_user_id=Number(data.manager_user_id);const saved=await api(team?`/workspaces/${state.workspace.id}/teams/${team.id}`:`/workspaces/${state.workspace.id}/teams`,{method:team?"PATCH":"POST",body:JSON.stringify(data)});if(team)state.teams=state.teams.map(item=>item.id===saved.id?saved:item);else state.teams.unshift(saved);toast(team?"Team updated":"Team created")}));
+  modal(formShell(team?"Edit team":"Create a team",team?"Update the global team, manager and purpose.":"Create a global team that can later be allocated to projects.",`${field("name","Team name","text","e.g. Design",true,false,team?.name)}${field("description","Description","textarea","What does this team own?",false,true,team?.description)}${selectField("manager_user_id","Team manager",managers.map(user=>[user.user_id,`${user.name} · ${user.professional_title}`]),team?.manager_user_id||managers[0]?.user_id)}<div class="field full reminder-compose-note"><strong>Manager designation</strong><span id="team-manager-designation">The selected member's designation is assigned automatically.</span></div>`,team?"Save changes":"Create team"),()=>{const form=$("#modal-form"),manager=form.elements.manager_user_id,label=$("#team-manager-designation"),update=()=>{const user=managers.find(item=>item.user_id===Number(manager.value));label.textContent=user?user.professional_title:"Select a manager"};manager.onchange=update;update();form.onsubmit=async e=>submitForm(e,async data=>{data.manager_user_id=Number(data.manager_user_id);const base=state.user?.is_system_admin?"/admin/teams":`/workspaces/${state.workspace.id}/teams`,saved=await api(team?`${base}/${team.id}`:base,{method:team?"PATCH":"POST",body:JSON.stringify(data)});if(team)state.teams=state.teams.map(item=>item.id===saved.id?saved:item);else state.teams.unshift(saved);toast(team?"Team updated":"Team created")})});
 }
 function columnModal(columnId=null){
   const column=state.board?.columns.find(item=>item.id===columnId);
@@ -1256,14 +1349,13 @@ function formShell(title,subtitle,fields,submit,extra=""){return `<h2>${title}</
 
 function peopleView() {
   if(!isAdmin())return emptyMini("Admin access required","Only workspace admins can manage people and teams.");
-  if(!state.workspace)return `${pageHeading("People & teams","Global people MIS. Create a workspace before creating teams or allocations.",`<span class="member-count">${state.userDirectory.length} registered</span>`)}<div class="no-workspace-mis-note"><strong>Workspace required for team management</strong><span>User profiles and completion data remain available below. Teams, departments, designations and allocations belong to a workspace.</span><button id="empty-workspace" class="btn primary">＋ Create workspace</button></div><section class="panel global-members-panel"><div class="panel-header"><h3>Global members</h3><span class="member-count">${state.userDirectory.length}</span></div>${state.userDirectory.map(user=>`<div class="member-row">${avatar(user)}<span class="member-copy"><strong>${esc(user.name)}</strong><small>${esc(user.email)}</small><span class="member-professional">${esc([user.professional_title,user.department].filter(Boolean).join(" · ")||"Professional details not set")}</span><span class="project-count">${user.completion_percent}% profile complete</span></span><span class="badge ${user.is_active?"active":"pending"}">${user.is_active?"Active":"Pending"}</span></div>`).join("")||emptyMini("No registered users","Registered accounts will appear here.")}</section>`;
   const admin=isAdmin();
   const adminWorkspaces=state.workspaces.filter(workspace=>workspace.role==="admin"||workspace.owner_id===state.user.id);
-  const directory=state.userDirectory;
+  const directory=state.userDirectory.filter(user=>user.is_member);
   const action=`<span class="member-count">${directory.length} registered</span>`;
-  return `${pageHeading("People & teams","Global member directory with workspace-specific teams and allocations.",action)}
-  <div class="people-workspace-switcher"><span>Admin workspaces</span>${adminWorkspaces.map(workspace=>`<button data-people-workspace="${workspace.id}" class="${workspace.id===state.workspace.id?"active":""}">${esc(workspace.name)}</button>`).join("")}</div>
-  <div class="people-grid"><section class="panel global-members-panel"><div class="panel-header"><h3>Global members</h3><span class="member-count">${directory.length}</span></div><div class="panel-search"><input id="global-member-search" placeholder="Search member name or email"><button id="global-member-search-button" type="button">Reset</button></div>
+  return `${pageHeading("People & teams","Member and administrator directory with project allocations.",action)}
+  ${adminWorkspaces.length?`<div class="people-workspace-switcher"><span>Project allocation workspace</span>${adminWorkspaces.map(workspace=>`<button data-people-workspace="${workspace.id}" class="${workspace.id===state.workspace?.id?"active":""}">${esc(workspace.name)}</button>`).join("")}</div>`:""}
+  <div class="people-grid"><section class="panel global-members-panel"><div class="panel-header"><h3>Members and admins</h3><span class="member-count">${directory.length}</span></div><div class="panel-search"><input id="global-member-search" placeholder="Search member name or email"><button id="global-member-search-button" type="button">Reset</button></div>
     ${directory.map(user=>{const projectCount=new Set(state.teamMembers.filter(a=>a.user_id===user.user_id).map(a=>a.project_id)).size;const access=user.role?pretty(user.role):user.is_active?"Registered":"Pending";return `<div class="member-row"><button class="member-profile-trigger" data-member-details="${user.user_id}" aria-label="View ${esc(user.name)}'s project assignments">${avatar(user)}<span class="member-copy"><strong>${esc(user.name)}</strong><small>${esc(user.email)}</small><span class="member-professional">${esc([user.professional_title,user.department].filter(Boolean).join(" · ")||"Professional details not set")}</span><span class="project-count">${projectCount} project${projectCount===1?"":"s"} in this workspace</span></span></button><span class="badge ${user.role||""}">${access}</span><button class="edit-action member-edit-action" data-global-member-profile="${user.user_id}">Edit details</button></div>`}).join("")}
   </section><section class="panel"><div class="panel-header"><h3>Teams</h3>${admin?'<button id="new-team">＋ New team</button>':`<span class="member-count">${state.teams.length}</span>`}</div>
     ${state.teams.length?state.teams.map(t=>{const allocations=state.teamMembers.filter(item=>item.team_id===t.id);return `<article class="team-card"><div class="team-card-head"><div><h4>${esc(t.name)}</h4><p>${esc(t.description||"No description")}</p>${t.manager_user?`<div class="team-manager"><b class="avatar">${esc(t.manager_user.name.slice(0,2).toUpperCase())}</b><span><small>TEAM MANAGER</small><strong>${esc(t.manager_user.name)}</strong><em>${esc(t.manager_designation)}</em></span></div>`:`<span class="manager-missing">Manager not assigned · use Edit</span>`}</div>${admin?`<div class="team-actions"><button data-allocate-team="${t.id}">＋ Allocate</button><button class="edit-action" data-edit-team="${t.id}">✎ Edit</button><button class="remove-action" data-delete-team="${t.id}">Delete</button></div>`:""}</div><div class="team-member-list">${allocations.length?allocations.map(a=>`<div class="team-member-row"><b class="avatar">${esc(a.user.name.slice(0,2).toUpperCase())}</b><div><strong>${esc(a.user.name)}</strong><small>${esc(a.designation)} · ${esc(a.project.name)}</small></div>${admin?`<button class="remove-action" data-remove-allocation="${a.id}" data-team-id="${t.id}">Remove</button>`:""}</div>`).join(""):'<p class="team-empty">No allocated members yet.</p>'}</div></article>`}).join(""):emptyMini("No teams yet","Create a team for a focused group.")}
@@ -1273,6 +1365,7 @@ function peopleView() {
 function bindPeoplePagination(){
   const memberPanel=$(".global-members-panel");
   if(!memberPanel)return;
+  const memberHeading=$(".panel-header h3",memberPanel);if(memberHeading)memberHeading.textContent="Members and admins";
   const teamPanel=memberPanel.nextElementSibling;
   teamPanel.classList.add("teams-panel");
   if(!$("#team-search",teamPanel)){
@@ -1329,11 +1422,11 @@ function memberProfessionalModal(member){
 }
 
 function teamAllocationModal(teamId){
-  const activeUsers=state.userDirectory.filter(user=>user.is_active),eligible=activeUsers.filter(user=>user.completion_percent===100),incomplete=activeUsers.filter(user=>user.completion_percent!==100);
+  const activeUsers=state.userDirectory.filter(user=>user.is_active&&user.is_member),eligible=activeUsers.filter(user=>(user.completion_percent||0)>=50),incomplete=activeUsers.filter(user=>(user.completion_percent||0)<50);
   if(!state.projects.length){toast("Create a project first",true);return}
-  if(!eligible.length){toast("No members have a 100% complete profile. Complete their details before team allocation.",true);return}
+  if(!eligible.length){toast("No members meet the minimum 50% profile completion required for allocation.",true);return}
   if(!state.designations.length){toast("Add a designation before allocating members",true);designationModal();return}
-  modal(formShell("Allocate team member","Only members with 100% profile completion are eligible.",`${selectField("user_id","Member",eligible.map(user=>[user.user_id,`${user.name} · 100%`]))}${selectField("project_id","Project",state.projects.map(p=>[p.id,p.name]))}${selectField("designation","Designation",state.designations.map(item=>[item.name,item.name]))}${incomplete.length?`<div class="field full allocation-profile-warning"><strong>${incomplete.length} member${incomplete.length===1?" is":"s are"} not eligible</strong><span>${incomplete.map(user=>`${esc(user.name)} (${user.completion_percent||0}%)`).join(", ")}</span></div>`:""}`,"Allocate member"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
+  modal(formShell("Allocate team member","Only active Members or Admins with at least 50% profile completion are eligible.",`${selectField("user_id","Member",eligible.map(user=>[user.user_id,`${user.name} · ${user.completion_percent||0}%`]))}${selectField("project_id","Project",state.projects.map(p=>[p.id,p.name]))}${selectField("designation","Designation",state.designations.map(item=>[item.name,item.name]))}${incomplete.length?`<div class="field full allocation-profile-warning"><strong>${incomplete.length} member${incomplete.length===1?" is":"s are"} below 50%</strong><span>${incomplete.map(user=>`${esc(user.name)} (${user.completion_percent||0}%)`).join(", ")}</span></div>`:""}`,"Allocate member"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
     data.user_id=Number(data.user_id);data.project_id=Number(data.project_id);
     const allocation=await api(`/workspaces/${state.workspace.id}/teams/${teamId}/members`,{method:"POST",body:JSON.stringify(data)});state.teamMembers.push(allocation);toast("Member allocated to project");
   }));
@@ -1353,7 +1446,7 @@ function designationModal(designation=null){
   if(!state.departments.length){toast("Create a department before adding a designation",true);departmentModal();return}
   modal(formShell(designation?"Edit designation":"Add designation",designation?"Update this department role across profiles and allocations.":"Create a designation under a department.",`${selectField("department_id","Department",state.departments.map(item=>[item.id,item.name]),designation?.department_id)}${field("name","Designation name","text","e.g. Mobile Developer",true,false,designation?.name)}${field("description","Description","textarea","Responsibilities or specialty",false,true,designation?.description)}`,designation?"Save changes":"Add designation"),()=>$("#modal-form").onsubmit=async event=>submitForm(event,async data=>{
     data.department_id=Number(data.department_id);
-    const saved=await api(designation?`/workspaces/${state.workspace.id}/designations/${designation.id}`:`/workspaces/${state.workspace.id}/designations`,{method:designation?"PATCH":"POST",body:JSON.stringify(data)});
+    const base=state.user?.is_system_admin?"/admin/designations":`/workspaces/${state.workspace.id}/designations`,saved=await api(designation?`${base}/${designation.id}`:base,{method:designation?"PATCH":"POST",body:JSON.stringify(data)});
     if(designation){state.designations=state.designations.map(item=>item.id===saved.id?saved:item);state.teamMembers.forEach(allocation=>{if(allocation.designation===designation.name)allocation.designation=saved.name})}else state.designations.push(saved);
     state.designations.sort((a,b)=>a.name.localeCompare(b.name));toast(designation?"Designation updated":"Designation added");
   }));
@@ -1361,7 +1454,7 @@ function designationModal(designation=null){
 
 function departmentModal(department=null){
   modal(formShell(department?"Edit department":"Add department",department?"Update this department for workspace profiles.":"Create a reusable department for professional profiles.",`${field("name","Department name","text","e.g. IT, Management, Accounts",true,false,department?.name)}${field("description","Description","textarea","What does this department handle?",false,true,department?.description)}`,department?"Save changes":"Add department"),()=>$("#modal-form").onsubmit=async event=>submitForm(event,async data=>{
-    const saved=await api(department?`/workspaces/${state.workspace.id}/departments/${department.id}`:`/workspaces/${state.workspace.id}/departments`,{method:department?"PATCH":"POST",body:JSON.stringify(data)});
+    const base=state.user?.is_system_admin?"/admin/departments":`/workspaces/${state.workspace.id}/departments`,saved=await api(department?`${base}/${department.id}`:base,{method:department?"PATCH":"POST",body:JSON.stringify(data)});
     if(department){state.departments=state.departments.map(item=>item.id===saved.id?saved:item);if(state.profile?.department===department.name)state.profile.department=saved.name}else state.departments.push(saved);
     state.departments.sort((a,b)=>a.name.localeCompare(b.name));toast(department?"Department updated":"Department added");
   }));
@@ -1370,7 +1463,7 @@ function departmentModal(department=null){
 function bindAccessControls(){
   $$('[data-member-details]').forEach(button=>button.onclick=()=>memberDetailsModal(Number(button.dataset.memberDetails)));
   if(!isAdmin())return;
-  $$("[data-global-member-profile]").forEach(button=>button.onclick=()=>adminUserProfileModal(state.userDirectory.find(user=>user.user_id===Number(button.dataset.globalMemberProfile))));
+  $$("[data-global-member-profile]").forEach(button=>button.onclick=()=>addDirectoryUserModal(state.userDirectory.find(user=>user.user_id===Number(button.dataset.globalMemberProfile))));
   $$('[data-remove-allocation]').forEach(remove=>{
     if(remove.previousElementSibling?.matches('[data-edit-allocation]'))return;
     const edit=document.createElement('button');
@@ -1383,13 +1476,13 @@ function bindAccessControls(){
   $$("[data-edit-member-profile]").forEach(button=>button.onclick=()=>memberProfessionalModal(state.members.find(member=>member.id===Number(button.dataset.editMemberProfile))));
   $("#new-designation")?.addEventListener("click",()=>designationModal());
   $$("[data-edit-designation]").forEach(button=>button.onclick=()=>designationModal(state.designations.find(item=>item.id===Number(button.dataset.editDesignation))));
-  $$("[data-delete-designation]").forEach(button=>button.onclick=async()=>{if(!confirm("Delete this designation? It will be cleared from affected profiles and team assignments."))return;try{const id=Number(button.dataset.deleteDesignation);await api(`/workspaces/${state.workspace.id}/designations/${id}`,{method:"DELETE"});await loadWorkspace();toast("Designation deleted and references cleared")}catch(err){toast(err.message,true)}});
+  $$("[data-delete-designation]").forEach(button=>button.onclick=async()=>{if(!confirm("Delete this designation? It will be cleared from affected profiles and team assignments."))return;try{const id=Number(button.dataset.deleteDesignation),base=state.user?.is_system_admin?"/admin/designations":`/workspaces/${state.workspace.id}/designations`;await api(`${base}/${id}`,{method:"DELETE"});state.designations=state.designations.filter(item=>item.id!==id);render();toast("Designation deleted and references cleared")}catch(err){toast(err.message,true)}});
   $("#new-department")?.addEventListener("click",()=>departmentModal());
   $$("[data-edit-department]").forEach(button=>button.onclick=()=>departmentModal(state.departments.find(item=>item.id===Number(button.dataset.editDepartment))));
-  $$("[data-delete-department]").forEach(button=>button.onclick=async()=>{if(!confirm("Delete this department? Its designations will be deleted and affected profile/team designation fields will be cleared."))return;try{const id=Number(button.dataset.deleteDepartment);await api(`/workspaces/${state.workspace.id}/departments/${id}`,{method:"DELETE"});await loadWorkspace();state.profile=await api("/auth/profile");render();toast("Department, designations and references cleared")}catch(err){toast(err.message,true)}});
+  $$("[data-delete-department]").forEach(button=>button.onclick=async()=>{if(!confirm("Delete this department? Its designations will be deleted and affected profile/team designation fields will be cleared."))return;try{const id=Number(button.dataset.deleteDepartment),base=state.user?.is_system_admin?"/admin/departments":`/workspaces/${state.workspace.id}/departments`;await api(`${base}/${id}`,{method:"DELETE"});state.departments=state.departments.filter(item=>item.id!==id);state.designations=state.designations.filter(item=>item.department_id!==id);state.profile=await api("/auth/profile");render();toast("Department, designations and references cleared")}catch(err){toast(err.message,true)}});
   $$("[data-allocate-team]").forEach(button=>button.onclick=()=>teamAllocationModal(Number(button.dataset.allocateTeam)));
   $$("[data-edit-team]").forEach(button=>button.onclick=()=>teamModal(state.teams.find(team=>team.id===Number(button.dataset.editTeam))));
-  $$("[data-delete-team]").forEach(button=>button.onclick=async()=>{if(!confirm("Delete this team and its allocations?"))return;try{const teamId=Number(button.dataset.deleteTeam);await api(`/workspaces/${state.workspace.id}/teams/${teamId}`,{method:"DELETE"});state.teams=state.teams.filter(t=>t.id!==teamId);state.teamMembers=state.teamMembers.filter(a=>a.team_id!==teamId);render();toast("Team deleted")}catch(err){toast(err.message,true)}});
+  $$("[data-delete-team]").forEach(button=>button.onclick=async()=>{if(!confirm("Delete this team and its allocations?"))return;try{const teamId=Number(button.dataset.deleteTeam),base=state.user?.is_system_admin?"/admin/teams":`/workspaces/${state.workspace.id}/teams`;await api(`${base}/${teamId}`,{method:"DELETE"});state.teams=state.teams.filter(t=>t.id!==teamId);state.teamMembers=state.teamMembers.filter(a=>a.team_id!==teamId);render();toast("Team deleted")}catch(err){toast(err.message,true)}});
   $$("[data-remove-allocation]").forEach(button=>button.onclick=async()=>{if(!confirm("Remove this member from the project team?"))return;try{const allocationId=Number(button.dataset.removeAllocation);await api(`/workspaces/${state.workspace.id}/teams/${button.dataset.teamId}/members/${allocationId}`,{method:"DELETE"});state.teamMembers=state.teamMembers.filter(a=>a.id!==allocationId);render();toast("Team member removed")}catch(err){toast(err.message,true)}});
   $$("[data-remove-member]").forEach(button=>button.onclick=async()=>{if(!confirm("Remove this member from the workspace and all teams?"))return;try{const memberId=Number(button.dataset.removeMember),member=state.members.find(m=>m.id===memberId);await api(`/workspaces/${state.workspace.id}/members/${memberId}`,{method:"DELETE"});state.members=state.members.filter(m=>m.id!==memberId);if(member)state.teamMembers=state.teamMembers.filter(a=>a.user_id!==member.user_id);render();toast("Workspace member removed")}catch(err){toast(err.message,true)}});
 }

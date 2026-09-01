@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.models import ChatType, Priority, ProjectStatus, TaskStatus, WorkspaceRole
 
@@ -21,6 +21,7 @@ class UserRead(ORMModel):
     email: EmailStr
     is_active: bool
     is_system_admin: bool = False
+    is_member: bool = False
     profile_image: str | None = None
     created_at: datetime
 
@@ -30,12 +31,47 @@ class UserProfileUpdate(BaseModel):
     profile_image: str | None = Field(default=None, max_length=3_000_000)
     phone: str | None = Field(default=None, max_length=40)
     location: str | None = Field(default=None, max_length=150)
-    bio: str | None = Field(default=None, max_length=3000)
+    location_city: str | None = Field(default=None, max_length=80)
+    location_state: str | None = Field(default=None, max_length=80)
+    location_country: str | None = Field(default=None, max_length=80)
+    bio: str | None = Field(default=None, max_length=300)
     professional_title: str | None = Field(default=None, max_length=150)
     department: str | None = Field(default=None, max_length=150)
     years_experience: int | None = Field(default=None, ge=0, le=80)
+    experience_start_date: date | None = None
     skills: str | None = Field(default=None, max_length=3000)
     achievements: str | None = Field(default=None, max_length=5000)
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        digits = "".join(character for character in value if character.isdigit())
+        if len(digits) != 10:
+            raise ValueError("Phone number must contain exactly 10 digits")
+        return digits
+
+    @field_validator("achievements")
+    @classmethod
+    def normalize_achievements(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        seen: set[str] = set()
+        items: list[str] = []
+        for raw in value.replace("\n", ",").split(","):
+            item = " ".join(raw.strip().split())
+            key = item.casefold()
+            if item and key not in seen:
+                seen.add(key)
+                items.append(item)
+        return ", ".join(items) or None
+
+    @model_validator(mode="after")
+    def validate_structured_profile(self):
+        if self.experience_start_date and self.experience_start_date > date.today():
+            raise ValueError("Experience start date cannot be in the future")
+        return self
 
 
 class UserProfileRead(UserProfileUpdate):
@@ -76,7 +112,7 @@ class WorkspaceRead(ORMModel):
 
 class NotificationRead(ORMModel):
     id: str
-    workspace_id: int
+    workspace_id: int | None = None
     project_id: int | None = None
     task_id: int | None = None
     conversation_id: int | None = None
@@ -105,6 +141,19 @@ class ProfileReminderSend(BaseModel):
 
 class ProfileReminderResult(BaseModel):
     sent_count: int
+
+
+class GlobalAnnouncementSend(BaseModel):
+    audience: str = Field(pattern="^(all|selected)$")
+    user_ids: list[int] = Field(default_factory=list, max_length=500)
+    title: str = Field(min_length=2, max_length=220)
+    message: str = Field(min_length=2, max_length=5000)
+
+    @model_validator(mode="after")
+    def validate_recipients(self):
+        if self.audience == "selected" and not self.user_ids:
+            raise ValueError("Select at least one recipient")
+        return self
 
 
 class NotificationReadAllResult(BaseModel):
@@ -171,6 +220,12 @@ class MemberAdd(BaseModel):
     role: WorkspaceRole = WorkspaceRole.member
 
 
+class GlobalMemberAssign(BaseModel):
+    department: str = Field(min_length=2, max_length=120)
+    professional_title: str = Field(min_length=2, max_length=120)
+    role: WorkspaceRole = WorkspaceRole.member
+
+
 class MemberRead(ORMModel):
     id: int
     workspace_id: int
@@ -197,6 +252,8 @@ class UserDirectoryRead(BaseModel):
     name: str
     email: EmailStr
     is_active: bool
+    is_member: bool = False
+    is_system_admin: bool = False
     membership_id: int | None = None
     membership_is_active: bool | None = None
     role: WorkspaceRole | None = None
@@ -263,7 +320,7 @@ class TeamCreate(BaseModel):
     name: str = Field(min_length=2, max_length=150)
     description: str | None = None
     manager_user_id: int
-    manager_designation: str = Field(min_length=2, max_length=120)
+    manager_designation: str | None = Field(default=None, min_length=2, max_length=120)
 
 
 class TeamUpdate(BaseModel):
@@ -275,7 +332,7 @@ class TeamUpdate(BaseModel):
 
 class TeamRead(ORMModel):
     id: int
-    workspace_id: int
+    workspace_id: int | None = None
     name: str
     description: str | None
     manager_user_id: int | None = None

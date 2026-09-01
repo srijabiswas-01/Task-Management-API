@@ -1,0 +1,41 @@
+:root {
+  --scrollbar-track: #eee9f5;
+  --scrollbar-thumb: #9b72e8;
+  --scrollbar-thumb-hover: #7c4ed8;
+}
+
+[data-theme="dark"] {
+  --scrollbar-track: #171221;
+  --scrollbar-thumb: #a855f7;
+  --scrollbar-thumb-hover: #c084fc;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: 10px !important;
+  height: 10px !important;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track) !important;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb) !important;
+  border: 2px solid var(--scrollbar-track) !important;
+  background-clip: border-box !important;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover) !important;
+}
+
+*::-webkit-scrollbar-corner {
+  background: var(--scrollbar-track) !important;
+}

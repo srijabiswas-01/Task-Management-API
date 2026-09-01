@@ -1,5 +1,6 @@
 from app.schemas import AIGeneratedPlan, AIGeneratedTask
 from app.services import ai_planner
+from conftest import valid_profile_image
 
 
 def test_ai_plan_preview_and_confirmation_create_board_tasks(
@@ -31,10 +32,11 @@ def test_ai_plan_preview_and_confirmation_create_board_tasks(
     completed_profile = client.put(
         f"/workspaces/{workspace_id}/users/{current_user['id']}/profile",
         json={
-            "name": current_user["name"], "profile_image": "data:image/png;base64,dGVzdA==",
-            "phone": "555-0100", "location": "Remote", "bio": "Delivery lead",
+            "name": current_user["name"], "profile_image": valid_profile_image(),
+            "phone": "5550100000", "location": "Remote",
+            "location_city": "Remote", "location_state": "Remote", "location_country": "United States", "bio": "Delivery lead",
             "professional_title": "Delivery Lead", "department": "Delivery",
-            "years_experience": 5, "skills": "Planning", "achievements": "Shipped products",
+            "years_experience": 5, "experience_start_date": "2021-01-01", "skills": "Planning", "achievements": "Shipped products",
         },
         headers=auth_headers,
     )

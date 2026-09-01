@@ -1,6 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
+from conftest import valid_profile_image
 
 
 def test_frontend_routes_return_the_application(client: TestClient):
@@ -38,6 +40,26 @@ def test_register_login_and_me(client: TestClient):
     assert global_users.status_code == 200
     assert global_users.json()[0]["email"] == "jane@example.com"
     assert client.get("/admin/skills", headers=admin_headers).status_code == 200
+
+
+def test_only_one_simultaneous_first_registration_becomes_admin(client: TestClient):
+    def register(index: int):
+        return client.post(
+            "/auth/register",
+            json={
+                "name": f"Concurrent User {index}",
+                "email": f"concurrent-{index}@example.com",
+                "password": "securepass123",
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(register, (1, 2)))
+
+    assert [response.status_code for response in responses] == [201, 201]
+    users = [response.json() for response in responses]
+    assert sum(user["is_system_admin"] for user in users) == 1
+    assert sum(user["is_active"] for user in users) == 1
 
 
 def test_auth_normalizes_email_and_rejects_bad_credentials(client: TestClient):
@@ -95,6 +117,30 @@ def test_inactive_user_cannot_login(client: TestClient):
     assert "waiting for administrator approval" in response.json()["detail"]
 
 
+def test_legacy_location_and_years_do_not_complete_structured_profile(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    response = client.put(
+        "/auth/profile",
+        json={
+            "name": "Test User",
+            "phone": "9999999999",
+            "location": "Kolkata, West Bengal, India",
+            "bio": "Legacy profile",
+            "years_experience": 2,
+            "skills": "Python",
+            "achievements": "Certification",
+        },
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    profile = response.json()
+    assert profile["completion_percent"] < 100
+    assert {"City", "State", "Country", "Experience start date"}.issubset(
+        profile["missing_fields"]
+    )
+
+
 def test_registration_requires_admin_approval(client: TestClient, auth_headers: dict[str, str]):
     workspace_id = client.post(
         "/workspaces", json={"name": "Approval workspace"}, headers=auth_headers
@@ -138,6 +184,98 @@ def test_registration_requires_admin_approval(client: TestClient, auth_headers: 
         "/auth/login",
         data={"username": "pending@example.com", "password": "securepass123"},
     ).status_code == 200
+    member_token = client.post(
+        "/auth/login",
+        data={"username": "pending@example.com", "password": "securepass123"},
+    ).json()["access_token"]
+    assert client.post(
+        "/workspaces",
+        json={"name": "Unauthorized workspace"},
+        headers={"Authorization": f"Bearer {member_token}"},
+    ).status_code == 403
+    member_headers = {"Authorization": f"Bearer {member_token}"}
+    assert client.patch(
+        f"/workspaces/{workspace_id}",
+        json={"name": "Unauthorized rename"},
+        headers=member_headers,
+    ).status_code == 403
+    assert client.request(
+        "DELETE",
+        f"/workspaces/{workspace_id}",
+        json={"workspace_name": "Approval workspace"},
+        headers=member_headers,
+    ).status_code == 403
+
+
+def test_global_people_catalog_and_teams_do_not_require_a_workspace(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    current_user = client.get("/auth/me", headers=auth_headers).json()
+    department = client.post(
+        "/admin/departments", json={"name": "Global Engineering"}, headers=auth_headers
+    )
+    assert department.status_code == 201
+    designation = client.post(
+        "/admin/designations",
+        json={"name": "Global Engineer", "department_id": department.json()["id"]},
+        headers=auth_headers,
+    )
+    assert designation.status_code == 201
+    assigned = client.patch(
+        f"/admin/users/{current_user['id']}/member",
+        json={"department": "Global Engineering", "professional_title": "Global Engineer"},
+        headers=auth_headers,
+    )
+    assert assigned.status_code == 200
+    assert assigned.json()["is_member"] is True
+    assert assigned.json()["is_system_admin"] is True
+    assert assigned.json()["role"] == "admin"
+    completed_manager = client.put(
+        f"/admin/users/{current_user['id']}/profile",
+        json={
+            "name": current_user["name"], "profile_image": valid_profile_image(),
+            "phone": "9999999999", "location_city": "Kolkata",
+            "location_state": "West Bengal", "location_country": "India",
+            "department": "Global Engineering", "professional_title": "Global Engineer",
+            "experience_start_date": "2021-01-01", "skills": "Leadership",
+        },
+        headers=auth_headers,
+    )
+    assert completed_manager.status_code == 200
+    assert completed_manager.json()["completion_percent"] >= 50
+    team = client.post(
+        "/admin/teams",
+        json={
+            "name": "Global Platform Team",
+            "manager_user_id": current_user["id"],
+            "manager_designation": "This value must be ignored",
+        },
+        headers=auth_headers,
+    )
+    assert team.status_code == 201
+    assert team.json()["workspace_id"] is None
+    assert team.json()["manager_designation"] == "Global Engineer"
+    assert client.get("/admin/users", headers=auth_headers).status_code == 200
+    assert client.get("/admin/departments", headers=auth_headers).json()[0]["name"] == "Global Engineering"
+    assert client.get("/admin/designations", headers=auth_headers).json()[0]["department_name"] == "Global Engineering"
+    assert client.get("/admin/teams", headers=auth_headers).json()[0]["name"] == "Global Platform Team"
+    pending = client.post(
+        "/auth/register",
+        json={"name": "Global User", "email": "global-user@example.com", "password": "securepass123"},
+    ).json()
+    approved = client.patch(f"/admin/users/{pending['id']}/approve", headers=auth_headers)
+    assert approved.status_code == 200
+    member = client.patch(
+        f"/admin/users/{pending['id']}/member",
+        json={"role": "member", "department": "Global Engineering", "professional_title": "Global Engineer"},
+        headers=auth_headers,
+    )
+    assert member.status_code == 200
+    assert member.json()["role"] == "member"
+    assert client.patch(f"/admin/users/{pending['id']}/access?is_active=false", headers=auth_headers).json()["is_active"] is False
+    assert client.patch(f"/admin/users/{pending['id']}/access?is_active=true", headers=auth_headers).json()["is_active"] is True
+    assert client.get(f"/admin/users/{pending['id']}/profile", headers=auth_headers).status_code == 200
+    assert client.delete(f"/admin/users/{pending['id']}", headers=auth_headers).status_code == 204
 
 
 def test_core_project_flow(client: TestClient, auth_headers: dict[str, str]):
@@ -262,14 +400,21 @@ def test_global_member_directory_survives_workspace_team_and_allocation_deletion
     completed_profile = client.put(
         f"/workspaces/{first['id']}/users/{registered['id']}/profile",
         json={
-            "name": "Global Member", "profile_image": "data:image/png;base64,dGVzdA==",
-            "phone": "555-0101", "location": "Remote", "bio": "Developer profile",
+            "name": "Global Member", "profile_image": valid_profile_image(),
+            "phone": "5550101000", "location": "Remote",
+            "location_city": "Remote", "location_state": "Remote", "location_country": "United States", "bio": "Developer profile",
             "professional_title": "Developer", "department": "Engineering",
-            "years_experience": 3, "skills": "Python", "achievements": "Completed training",
+            "years_experience": 3, "experience_start_date": "2023-01-01", "skills": "Python", "achievements": "Completed training",
         },
         headers=auth_headers,
     )
     assert completed_profile.json()["completion_percent"] == 100
+    assigned = client.patch(
+        f"/admin/users/{registered['id']}/member",
+        json={"role": "member", "department": "Engineering", "professional_title": "Developer"},
+        headers=auth_headers,
+    )
+    assert assigned.status_code == 200
     project = client.post(
         f"/workspaces/{first['id']}/projects",
         json={"name": "Scoped project", "start_date": "2026-08-01", "end_date": "2026-12-31"},
@@ -997,10 +1142,11 @@ def test_team_allocation_controls_member_collaboration_access(
     completed_profile = client.put(
         f"/workspaces/{workspace_id}/users/{teammate['id']}/profile",
         json={
-            "name": "Mobile Developer", "profile_image": "data:image/png;base64,dGVzdA==",
-            "phone": "555-0102", "location": "Remote", "bio": "Mobile specialist",
+            "name": "Mobile Developer", "profile_image": valid_profile_image(),
+            "phone": "5550102000", "location": "Remote",
+            "location_city": "Remote", "location_state": "Remote", "location_country": "United States", "bio": "Mobile specialist",
             "professional_title": "Android Developer", "department": "Mobile Engineering",
-            "years_experience": 4, "skills": "Android, Kotlin", "achievements": "Published an app",
+            "years_experience": 4, "experience_start_date": "2022-01-01", "skills": "Android, Kotlin", "achievements": "Published an app",
         },
         headers=auth_headers,
     )
@@ -1165,6 +1311,17 @@ def test_team_allocation_controls_member_collaboration_access(
     )
     assert promoted.status_code == 200
     assert promoted.json()["role"] == "admin"
+    assert client.patch(
+        f"/workspaces/{workspace_id}",
+        json={"name": "Workspace-admin rename"},
+        headers=member_headers,
+    ).status_code == 403
+    assert client.request(
+        "DELETE",
+        f"/workspaces/{workspace_id}",
+        json={"workspace_name": "Product"},
+        headers=member_headers,
+    ).status_code == 403
     demoted = client.patch(
         f"/workspaces/{workspace_id}/members/{workspace_member['id']}/access",
         json={"role": "member"},
@@ -1195,6 +1352,9 @@ def test_current_user_profile_and_project_history(
     )
     assert profile_update.status_code == 200
     assert profile_update.json()["skills"] == "Python, SQL, FastAPI, Docker"
+    global_catalog = client.get("/auth/skill-catalog", headers=auth_headers)
+    assert global_catalog.status_code == 200
+    assert global_catalog.json() == ["Docker", "FastAPI", "Python", "SQL"]
     catalog = client.get(
         f"/workspaces/{workspace_id}/skill-catalog", headers=auth_headers
     )
@@ -1244,15 +1404,16 @@ def test_current_user_profile_and_project_history(
         "/auth/profile",
         json={
             "name": "Updated Profile Name",
-            "phone": "+91 99999 99999",
+            "phone": "9999999999",
             "location": "Kolkata, India",
+            "location_city": "Kolkata", "location_state": "West Bengal", "location_country": "India",
             "bio": "Product delivery specialist",
             "professional_title": "Project Lead",
             "department": "Engineering",
-            "years_experience": 8,
+            "years_experience": 8, "experience_start_date": "2018-01-01",
             "skills": "Planning, Leadership, APIs",
             "achievements": "Delivered the Orbit platform",
-            "profile_image": "data:image/png;base64,dGVzdA==",
+            "profile_image": valid_profile_image(),
         },
         headers=auth_headers,
     )
@@ -1262,6 +1423,29 @@ def test_current_user_profile_and_project_history(
     assert profile["project_count"] == 1
     assert profile["projects"] == ["Profile project"]
     assert profile["professional_title"] == "Project Lead"
+    assert profile["location_city"] == "Kolkata"
+    assert profile["location_state"] == "West Bengal"
+    assert profile["location_country"] == "India"
+    assert profile["experience_start_date"] == "2018-01-01"
+    persisted_profile = client.get("/auth/profile", headers=auth_headers).json()
+    assert persisted_profile["location_city"] == "Kolkata"
+    assert persisted_profile["location_state"] == "West Bengal"
+    assert persisted_profile["location_country"] == "India"
+    assert persisted_profile["experience_start_date"] == "2018-01-01"
+    admin_partial_update = client.put(
+        f"/workspaces/{workspace_id}/users/{current_member['user_id']}/profile",
+        json={
+            "name": "Updated Profile Name",
+            "department": "Engineering",
+            "professional_title": "Project Lead",
+            "experience_start_date": "2018-01-01",
+            "skills": "Planning, Leadership, APIs, Coaching",
+        },
+        headers=auth_headers,
+    )
+    assert admin_partial_update.status_code == 200
+    assert admin_partial_update.json()["phone"] == "9999999999"
+    assert admin_partial_update.json()["location_city"] == "Kolkata"
     assert client.get("/auth/me", headers=auth_headers).json()["name"] == "Updated Profile Name"
     renamed = client.patch(
         f"/workspaces/{workspace_id}/departments/{department['id']}",
@@ -1310,6 +1494,25 @@ def test_incomplete_profile_cannot_be_allocated_and_member_cannot_set_admin_fiel
         f"/workspaces/{workspace['id']}/designations",
         json={"name": "Analyst", "department_id": operations["id"]}, headers=auth_headers,
     )
+    assigned = client.patch(
+        f"/admin/users/{member['id']}/member",
+        json={"role": "member", "department": "Operations", "professional_title": "Analyst"},
+        headers=auth_headers,
+    )
+    assert assigned.status_code == 200
+    admin = client.get("/auth/me", headers=auth_headers).json()
+    admin_profile = client.put(
+        f"/admin/users/{admin['id']}/profile",
+        json={
+            "name": admin["name"], "profile_image": valid_profile_image(),
+            "phone": "5550102000", "location_city": "Admin City",
+            "location_state": "Admin State", "location_country": "Admin Country",
+            "bio": "Administrator", "department": "Operations",
+            "professional_title": "Analyst", "experience_start_date": "2023-01-01",
+            "skills": "Leadership", "achievements": "",
+        }, headers=auth_headers,
+    )
+    assert admin_profile.status_code == 200
     project = client.post(
         f"/workspaces/{workspace['id']}/projects",
         json={"name": "Profile project", "start_date": "2026-08-01", "end_date": "2026-12-31"},
@@ -1317,7 +1520,7 @@ def test_incomplete_profile_cannot_be_allocated_and_member_cannot_set_admin_fiel
     ).json()
     team = client.post(
         f"/workspaces/{workspace['id']}/teams",
-        json={"name": "Profile team", "manager_user_id": member["id"], "manager_designation": "Analyst"},
+        json={"name": "Profile team", "manager_user_id": admin["id"], "manager_designation": "Analyst"},
         headers=auth_headers,
     ).json()
     blocked = client.post(
@@ -1326,7 +1529,8 @@ def test_incomplete_profile_cannot_be_allocated_and_member_cannot_set_admin_fiel
         headers=auth_headers,
     )
     assert blocked.status_code == 400
-    assert "Profile is 10% complete" in blocked.json()["detail"]
+    assert "profile is only" in blocked.json()["detail"]
+    assert "At least 50%" in blocked.json()["detail"]
 
     login = client.post(
         "/auth/login", data={"username": "incomplete@example.com", "password": "securepass123"}
@@ -1377,3 +1581,51 @@ def test_incomplete_profile_cannot_be_allocated_and_member_cannot_set_admin_fiel
     assert mark_all.status_code == 200
     assert mark_all.json()["marked_count"] == 1
     assert client.get("/notifications", headers=member_headers).json()["unread_count"] == 0
+
+
+def test_global_reminders_and_announcements_work_without_workspace(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    member = client.post(
+        "/auth/register",
+        json={"name": "Global Notice", "email": "notice@example.com", "password": "securepass123"},
+    ).json()
+    assert client.patch(f"/admin/users/{member['id']}/approve", headers=auth_headers).status_code == 200
+    department = client.post(
+        "/admin/departments", json={"name": "Support"}, headers=auth_headers,
+    ).json()
+    assert client.post(
+        "/admin/designations",
+        json={"name": "Support Agent", "department_id": department["id"]},
+        headers=auth_headers,
+    ).status_code == 201
+    assert client.patch(
+        f"/admin/users/{member['id']}/member",
+        json={"role": "member", "department": "Support", "professional_title": "Support Agent"},
+        headers=auth_headers,
+    ).status_code == 200
+    login = client.post(
+        "/auth/login", data={"username": "notice@example.com", "password": "securepass123"}
+    ).json()
+    member_headers = {"Authorization": f"Bearer {login['access_token']}"}
+
+    reminder = client.post(
+        "/notifications/profile-completion", json={"user_ids": [member["id"]]}, headers=auth_headers,
+    )
+    assert reminder.status_code == 200
+    assert reminder.json()["sent_count"] == 1
+    announcement = client.post(
+        "/admin/announcements",
+        json={"audience": "selected", "user_ids": [member["id"]], "title": "Company update", "message": "This is a global announcement."},
+        headers=auth_headers,
+    )
+    assert announcement.status_code == 200
+    assert announcement.json()["sent_count"] == 1
+
+    items = client.get("/notifications", headers=member_headers).json()["items"]
+    assert any(item["id"].startswith("global-profile-") for item in items)
+    global_announcement = next(item for item in items if item["id"].startswith("announcement-"))
+    assert global_announcement["workspace_id"] is None
+    assert client.patch(
+        f"/notifications/{global_announcement['id']}/read", headers=member_headers
+    ).status_code == 200

@@ -39,6 +39,12 @@ async def lifespan(_: FastAPI):
             connection.execute(text(
                 f"ALTER TABLE users ADD COLUMN is_system_admin BOOLEAN NOT NULL DEFAULT {default}"
             ))
+    if "is_member" not in user_columns:
+        default = "0" if engine.dialect.name == "sqlite" else "FALSE"
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE users ADD COLUMN is_member BOOLEAN NOT NULL DEFAULT {default}"))
+            truth = "1" if engine.dialect.name == "sqlite" else "TRUE"
+            connection.execute(text(f"UPDATE users SET is_member = {truth} WHERE is_system_admin = {truth} OR id IN (SELECT DISTINCT user_id FROM workspace_members)"))
             connection.execute(text(
                 "UPDATE users SET is_system_admin = "
                 + ("1" if engine.dialect.name == "sqlite" else "TRUE")
@@ -47,9 +53,27 @@ async def lifespan(_: FastAPI):
     project_columns = {column["name"] for column in inspect(engine).get_columns("projects")}
     task_columns = {column["name"] for column in inspect(engine).get_columns("tasks")}
     team_member_columns = {column["name"] for column in inspect(engine).get_columns("team_members")}
+    team_columns = {column["name"]: column for column in inspect(engine).get_columns("teams")}
     chat_message_columns = {column["name"] for column in inspect(engine).get_columns("chat_messages")} if inspect(engine).has_table("chat_messages") else set()
     designation_columns = {column["name"] for column in inspect(engine).get_columns("global_designations")}
+    profile_columns = {column["name"] for column in inspect(engine).get_columns("user_profiles")}
+    if team_columns.get("workspace_id") and not team_columns["workspace_id"].get("nullable", True):
+        if engine.dialect.name == "sqlite":
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+                connection.execute(text("PRAGMA foreign_keys=OFF"))
+                connection.execute(text("CREATE TABLE teams_globalized (id INTEGER NOT NULL PRIMARY KEY, workspace_id INTEGER REFERENCES workspaces(id) ON DELETE SET NULL, name VARCHAR(150) NOT NULL, description TEXT, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"))
+                connection.execute(text("INSERT INTO teams_globalized (id, workspace_id, name, description, created_at, updated_at) SELECT id, workspace_id, name, description, created_at, updated_at FROM teams"))
+                connection.execute(text("DROP TABLE teams"))
+                connection.execute(text("ALTER TABLE teams_globalized RENAME TO teams"))
+                connection.execute(text("PRAGMA foreign_keys=ON"))
+        else:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE teams ALTER COLUMN workspace_id DROP NOT NULL"))
+                connection.execute(text("ALTER TABLE teams DROP CONSTRAINT IF EXISTS teams_workspace_id_fkey"))
+                connection.execute(text("ALTER TABLE teams ADD CONSTRAINT teams_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL"))
     with engine.begin() as connection:
+        if "phone_country_code" in profile_columns:
+            connection.execute(text("ALTER TABLE user_profiles DROP COLUMN phone_country_code"))
         if "start_date" not in project_columns:
             connection.execute(text("ALTER TABLE projects ADD COLUMN start_date DATE"))
         if "end_date" not in project_columns:
@@ -68,6 +92,10 @@ async def lifespan(_: FastAPI):
             ("tasks", task_columns, "actual_cost", "INTEGER"),
             ("team_members", team_member_columns, "allocation_percent", "INTEGER NOT NULL DEFAULT 100"),
             ("team_members", team_member_columns, "weekly_capacity_hours", "INTEGER NOT NULL DEFAULT 40"),
+            ("user_profiles", profile_columns, "location_city", "VARCHAR(80)"),
+            ("user_profiles", profile_columns, "location_state", "VARCHAR(80)"),
+            ("user_profiles", profile_columns, "location_country", "VARCHAR(80)"),
+            ("user_profiles", profile_columns, "experience_start_date", "DATE"),
         )
         for table, columns, column, definition in compatibility_columns:
             if column not in columns:

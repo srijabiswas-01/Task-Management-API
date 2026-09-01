@@ -12,11 +12,12 @@
   <link rel="stylesheet" href="/static/styles.css?v=20260826-profile-reminders">
   <link rel="stylesheet" href="/static/chat.css?v=20260827-chat-role-fix">
   <link rel="stylesheet" href="/static/chat-mis.css?v=20260827-mis-process">
-  <link rel="stylesheet" href="/static/header-updates.css?v=20260827-split-updates">
+  <link rel="stylesheet" href="/static/header-updates.css?v=20260901-account-menu">
   <link rel="stylesheet" href="/static/chat-compose.css?v=20260827-compose-design">
   <link rel="stylesheet" href="/static/responsive-shell.css?v=20260827-responsive-shell">
   <link rel="stylesheet" href="/static/chat-scroll.css?v=20260828-chat-scroll">
   <link rel="stylesheet" href="/static/chat-professional.css?v=20260828-chat-persistence">
+  <link rel="stylesheet" href="/static/scrollbars.css?v=20260831-global-scrollbars">
 </head>
 <body>
   <div id="toast" class="toast" aria-live="polite"></div>
@@ -49,12 +50,12 @@
         <div class="mobile-brand brand"><span class="brand-mark">O</span> Orbit</div>
         <h2 id="auth-title">Welcome back</h2>
         <p id="auth-subtitle">Sign in to continue to your workspace.</p>
-        <form id="login-form" class="form-stack">
+        <form id="login-form" class="form-stack" novalidate>
           <label>Email address<input id="login-email" type="email" placeholder="you@company.com" required></label>
           <label>Password<span class="password-field"><input id="login-password" type="password" placeholder="At least 8 characters" minlength="8" required><button class="password-toggle" type="button" data-password-target="login-password" aria-label="Show password" aria-pressed="false" title="Show password"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.7"/></svg></button></span></label>
           <button class="btn primary wide" type="submit">Sign in <span>→</span></button>
         </form>
-        <form id="register-form" class="form-stack hidden">
+        <form id="register-form" class="form-stack hidden" novalidate>
           <label>Full name<input id="register-name" placeholder="Your name" minlength="2" required></label>
           <label>Email address<input id="register-email" type="email" placeholder="you@company.com" required></label>
           <label>Password<span class="password-field"><input id="register-password" type="password" placeholder="At least 8 characters" minlength="8" required><button class="password-toggle" type="button" data-password-target="register-password" aria-label="Show password" aria-pressed="false" title="Show password"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.7"/></svg></button></span></label>
@@ -105,6 +106,15 @@
         <button id="mobile-menu" class="icon-btn">☰</button>
         <div><span class="crumb">Workspace</span><strong id="page-title">Overview</strong></div>
         <div class="top-actions">
+          <div class="header-account">
+            <button id="header-account-button" class="header-user-chip" type="button" aria-label="Open account menu" aria-expanded="false">
+              <b id="header-user-avatar">U</b><strong id="header-user-name">User</strong><i>⌄</i>
+            </button>
+            <div id="header-account-menu" class="header-account-menu hidden">
+              <button id="header-profile-button" type="button"><span>♙</span> My profile</button>
+              <button id="header-logout-button" type="button"><span>↪</span> Log out</button>
+            </div>
+          </div>
           <div class="notification-center">
             <button id="notification-button" class="icon-btn notification-button" title="Notifications" aria-label="Notifications" aria-expanded="false">
               <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
@@ -131,6 +141,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=20260828-chat-persistence"></script>
+  <script src="/static/app.js?v=20260901-global-user-panel"></script>
 </body>
 </html>
