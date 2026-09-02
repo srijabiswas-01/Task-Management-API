@@ -19,7 +19,15 @@ engine_options = {
     "hide_parameters": True,
 }
 if not settings.database_url.startswith("sqlite"):
-    engine_options.update(pool_recycle=300, pool_use_lifo=True)
+    # Keep hosted-Postgres usage predictable on free tiers. A small LIFO pool
+    # reuses warm connections without opening a large burst of database sessions.
+    engine_options.update(
+        pool_size=3,
+        max_overflow=2,
+        pool_timeout=15,
+        pool_recycle=300,
+        pool_use_lifo=True,
+    )
 
 engine = create_engine(settings.database_url, **engine_options)
 if settings.database_url.startswith("sqlite"):

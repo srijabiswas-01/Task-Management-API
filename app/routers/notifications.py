@@ -1,7 +1,7 @@
 from datetime import datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
@@ -112,8 +112,10 @@ def list_notifications(
     db: DB,
     current_user: CurrentUser,
     limit: int = Query(default=50, ge=1, le=100),
+    sync_tasks: bool = Query(default=True),
 ) -> NotificationList:
-    sync_deadline_notifications(db, current_user.id)
+    if sync_tasks:
+        sync_deadline_notifications(db, current_user.id)
     active_filter = (
         Notification.user_id == current_user.id,
         Notification.is_resolved.is_(False),
@@ -144,16 +146,16 @@ def list_notifications(
         for reminder in global_reminders:
             reminder.is_resolved = True
         db.commit()
-    unread = db.scalars(
-        select(Notification).where(*active_filter, Notification.is_read.is_(False))
-    ).all()
-    critical = db.scalars(
-        select(Notification).where(
+    unread_count = db.scalar(
+        select(func.count(Notification.id)).where(*active_filter, Notification.is_read.is_(False))
+    ) or 0
+    critical_count = db.scalar(
+        select(func.count(Notification.id)).where(
             *active_filter,
             Notification.severity == "critical",
             Notification.is_acknowledged.is_(False),
         )
-    ).all()
+    ) or 0
     serialized = [NotificationRead(
         id=str(item.id), workspace_id=item.workspace_id, project_id=item.project_id,
         task_id=item.task_id, kind=item.kind, severity=item.severity, title=item.title,
@@ -183,8 +185,8 @@ def list_notifications(
     announcement_unread = sum(1 for item in announcements if not item.is_read)
     return NotificationList(
         items=serialized[:limit],
-        unread_count=len(unread) + reminder_unread + announcement_unread,
-        critical_count=len(critical),
+        unread_count=unread_count + reminder_unread + announcement_unread,
+        critical_count=critical_count,
     )
 
 

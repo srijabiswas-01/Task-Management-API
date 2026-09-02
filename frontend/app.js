@@ -1,5 +1,6 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const pendingGetRequests = new Map();
 const state = {
   token: localStorage.getItem("orbit_token"), profile: null,
   user: null, workspaces: [], workspace: null, projects: [], project: null, chatConversations: [], chatOptions: null, chatMessages: [], activeChatId: null, chatFilter: "all", chatQuery: "", chatReplyTo: null, chatDraft: "",
@@ -93,14 +94,19 @@ async function api(path, options = {}) {
   const authenticatedRequest = Boolean(state.token) && !publicAuthRequest;
   if (authenticatedRequest) headers.Authorization = `Bearer ${state.token}`;
   if (options.body && !(options.body instanceof URLSearchParams)) headers["Content-Type"] = "application/json";
-  const response = await fetch(path, {...options, headers});
+  const method=(options.method||"GET").toUpperCase(),requestKey=method==="GET"&&authenticatedRequest?path:null;
+  if(requestKey&&pendingGetRequests.has(requestKey))return pendingGetRequests.get(requestKey);
+  const request=(async()=>{const response = await fetch(path, {...options, headers});
   if (response.status === 401 && authenticatedRequest) { logout(false); throw new Error("Your session expired. Please sign in again."); }
   if (!response.ok) {
     let detail = "Something went wrong";
     try { const data = await response.json(); detail = Array.isArray(data.detail) ? data.detail.map(x => x.msg).join(", ") : data.detail; } catch {}
     throw new Error(detail);
   }
-  return response.status === 204 ? null : response.json();
+  return response.status === 204 ? null : response.json()})();
+  if(!requestKey)return request;
+  pendingGetRequests.set(requestKey,request);
+  try{return await request}finally{pendingGetRequests.delete(requestKey)}
 }
 function formData(form) {
   return Object.fromEntries([...new FormData(form).entries()].map(([k,v]) => [k, v === "" ? null : v]));
@@ -314,7 +320,7 @@ function activeWorkspace() {
 }
 async function loadNotifications(renderPage=false){
   if(!state.token||!state.user)return;
-  const data=await api("/notifications?limit=50");
+  const fullList=renderPage||state.view==="notifications",data=await api(`/notifications?limit=${fullList?50:8}&sync_tasks=${fullList}`);
   state.notifications=data.items;state.notificationUnread=data.unread_count;state.notificationCritical=data.critical_count;
   renderNotificationHeader();
   if(renderPage&&state.view==="notifications")render();
@@ -511,12 +517,12 @@ function notificationsView(){
   return `${pageHeading("Notifications","Deadline reminders and updates that need your attention.",`<button id="notification-refresh" class="btn">Refresh</button>`)}<div class="notification-summary"><div><strong>${state.notificationCritical}</strong><span>Critical actions</span></div><div><strong>${state.notificationUnread}</strong><span>New notifications</span></div></div><section class="notification-list"><h3>Active</h3>${active.length?rows(active):emptyMini("You’re all caught up","No active deadline alerts.")}${history.length?`<h3 class="notification-history-title">Recent history</h3>${rows(history.slice(0,20))}`:""}</section>`;
 }
 function updateChatCount(){const count=state.chatConversations.reduce((sum,item)=>sum+item.unread_count,0),badge=$("#sidebar-chat-count");if(badge){badge.textContent=count>99?"99+":count;badge.classList.toggle("hidden",!count)}}
-async function loadChats(renderPage=true){
+async function loadChats(renderPage=true,loadMessages=renderPage){
   const [globalChats,workspaceChats]=await Promise.all([api("/chat/conversations"),state.workspace?api(`/workspaces/${state.workspace.id}/chat/conversations`):Promise.resolve([])]);
   state.chatConversations=[...globalChats,...workspaceChats];updateChatCount();renderNotificationHeader();
   if(state.activeChatId&&!state.chatConversations.some(item=>item.id===state.activeChatId))state.activeChatId=null;
   if(!state.activeChatId)state.activeChatId=state.chatConversations[0]?.id||null;
-  if(state.activeChatId){const selected=state.chatConversations.find(item=>item.id===state.activeChatId);state.chatMessages=await api(`${chatBase(selected)}/conversations/${state.activeChatId}/messages`)}else state.chatMessages=[];
+  if(state.activeChatId&&loadMessages){const selected=state.chatConversations.find(item=>item.id===state.activeChatId);state.chatMessages=await api(`${chatBase(selected)}/conversations/${state.activeChatId}/messages?limit=100`)}else if(!state.activeChatId)state.chatMessages=[];
   const active=state.chatConversations.find(item=>item.id===state.activeChatId);if(active)active.unread_count=0;updateChatCount();
   if(renderPage&&state.view==="chat")render();
 }
@@ -1106,24 +1112,26 @@ function projectModal(){
   const workspace = activeWorkspace();
   if (!workspace) { toast("Create or select a workspace first", true); workspaceModal(); return; }
   const workspaceId = workspace.id;
-  const projectAdmins=state.members.filter(member=>member.role==="admin");
+  const projectAdmins=state.userDirectory.filter(user=>user.is_active&&user.is_system_admin).map(user=>[user.user_id,user.name]);
+  if(state.user?.is_system_admin&&!projectAdmins.some(([id])=>id===state.user.id))projectAdmins.unshift([state.user.id,state.user.name]);
   modal(formShell("Create a project","Turn an idea into an organized plan.",`
   ${field("name","Project name","text","e.g. Mobile app launch",true)}${field("description","Description","textarea","What is this project about?","",true)}
   ${selectField("framework","Work framework",[["kanban","Kanban — continuous flow"],["scrum","Scrum — sprint planning"]],"kanban")}
   ${selectField("status","Status",["planned","active","on_hold","completed"])}${selectField("priority","Priority",["low","medium","high","critical"],"medium")}
-  ${selectField("project_manager_id","Project admin",projectAdmins.map(member=>[member.user_id,member.user.name]),state.user.id)}
+  ${selectField("project_manager_id","Project admin",projectAdmins,state.user.id)}
   ${field("start_date","Start date","date","",true)}${field("end_date","End date","date","",true)}${field("budget","Budget","number","Optional")}`,"Create project"),()=>$("#modal-form").onsubmit=async e=>submitForm(e,async data=>{
     const framework=data.framework;delete data.framework;data.project_manager_id=Number(data.project_manager_id);if(data.budget)data.budget=Number(data.budget);const p=await api(`/workspaces/${workspaceId}/projects`,{method:"POST",body:JSON.stringify(data)});await api(`/projects/${p.id}/board`,{method:"PUT",body:JSON.stringify({framework})});state.projects.unshift(p);state.project=p;localStorage.setItem(`orbit_project_${workspaceId}`,p.id);await loadWorkspace();toast(`${pretty(framework)} project created`);
   }));}
 function projectEditModal(project){
   if(!project)return;
-  const projectAdmins=state.members.filter(member=>member.role==="admin");
+  const projectAdmins=state.userDirectory.filter(user=>user.is_active&&user.is_system_admin).map(user=>[user.user_id,user.name]);
+  if(state.user?.is_system_admin&&!projectAdmins.some(([id])=>id===state.user.id))projectAdmins.unshift([state.user.id,state.user.name]);
   modal(formShell("Edit project","Update the project details and delivery settings.",`
     ${field("name","Project name","text","Project name",true,false,project.name)}
     ${field("description","Description","textarea","What is this project about?","",true,project.description)}
     ${selectField("status","Status",["planned","active","on_hold","completed"],project.status)}
     ${selectField("priority","Priority",["low","medium","high","critical"],project.priority)}
-    ${selectField("project_manager_id","Project admin",projectAdmins.map(member=>[member.user_id,member.user.name]),project.project_manager_id||state.user.id)}
+    ${selectField("project_manager_id","Project admin",projectAdmins,project.project_manager_id||state.user.id)}
     ${field("start_date","Start date","date","",true,false,project.start_date)}
     ${field("end_date","End date","date","",true,false,project.end_date)}
     ${field("budget","Budget","number","Optional","",false,project.budget)}`,

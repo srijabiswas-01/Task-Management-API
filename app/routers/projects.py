@@ -10,7 +10,7 @@ from app.dependencies import (
     require_workspace_admin,
     require_workspace_member,
 )
-from app.models import Project, ProjectBoard, Sprint, Task, TaskStatus, TeamMember, WorkspaceMember, WorkspaceRole
+from app.models import Project, ProjectBoard, Sprint, Task, TaskStatus, TeamMember, User, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     ProjectCreate,
     ProjectRead,
@@ -24,6 +24,13 @@ router = APIRouter(tags=["Projects"])
 
 
 def validate_project_manager(db: DB, workspace_id: int, user_id: int) -> None:
+    global_admin = db.scalar(select(User.id).where(
+        User.id == user_id,
+        User.is_system_admin.is_(True),
+        User.is_active.is_(True),
+    ))
+    if global_admin is not None:
+        return
     manager = db.scalar(select(WorkspaceMember).where(
         WorkspaceMember.workspace_id == workspace_id,
         WorkspaceMember.user_id == user_id,
@@ -31,7 +38,7 @@ def validate_project_manager(db: DB, workspace_id: int, user_id: int) -> None:
         WorkspaceMember.is_active.is_(True),
     ))
     if manager is None:
-        raise HTTPException(status_code=400, detail="Project manager must be a workspace admin")
+        raise HTTPException(status_code=400, detail="Project admin must be an active administrator")
 
 
 def accessible_project(db: DB, project_id: int, user_id: int) -> Project:

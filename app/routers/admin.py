@@ -129,6 +129,8 @@ def assign_global_member(user_id: int, payload: GlobalMemberAssign, db: DB, curr
         user.profile = UserProfile()
     user.profile.department = department.name
     user.profile.professional_title = designation.name
+    for membership in db.scalars(select(GlobalTeamMember).where(GlobalTeamMember.user_id == user.id)).all():
+        membership.designation = designation.name
     user.is_member = True
     if "role" in payload.model_fields_set:
         if user.id == current_user.id and payload.role.value != "admin":
@@ -177,7 +179,17 @@ def update_global_user_profile(user_id: int, payload: UserProfileUpdate, db: DB,
     from app.routers.workspaces import update_admin_managed_profile
     user = db.get(User, user_id)
     if user is None: raise HTTPException(status_code=404, detail="User not found")
-    return update_admin_managed_profile(db, 0, user, payload)
+    result = update_admin_managed_profile(db, 0, user, payload)
+    if result.professional_title:
+        memberships = db.scalars(select(GlobalTeamMember).where(GlobalTeamMember.user_id == user.id)).all()
+        changed = False
+        for membership in memberships:
+            if membership.designation != result.professional_title:
+                membership.designation = result.professional_title
+                changed = True
+        if changed:
+            db.commit()
+    return result
 
 
 @router.delete("/users/{user_id}", status_code=204)
@@ -285,6 +297,7 @@ def update_global_designation(designation_id: int, payload: DesignationUpdate, d
     if item.name != old_name:
         for profile in db.scalars(select(UserProfile).where(UserProfile.professional_title == old_name)).all(): profile.professional_title = item.name
         for allocation in db.scalars(select(TeamMember).where(TeamMember.designation == old_name)).all(): allocation.designation = item.name
+        for membership in db.scalars(select(GlobalTeamMember).where(GlobalTeamMember.designation == old_name)).all(): membership.designation = item.name
         for manager in db.scalars(select(TeamManager).where(TeamManager.designation == old_name)).all(): manager.designation = item.name
     db.commit(); db.refresh(item)
     return designation_response(item)
@@ -363,7 +376,20 @@ def list_global_team_members(db: DB, current_user: CurrentUser) -> list[TeamMemb
 @router.get("/global-team-members", response_model=list[GlobalTeamMemberRead])
 def list_global_team_memberships(db: DB, current_user: CurrentUser) -> list[GlobalTeamMember]:
     require_system_admin(current_user)
-    return list(db.scalars(select(GlobalTeamMember).options(selectinload(GlobalTeamMember.user)).order_by(GlobalTeamMember.created_at)).all())
+    memberships = list(db.scalars(
+        select(GlobalTeamMember)
+        .options(selectinload(GlobalTeamMember.user).selectinload(User.profile))
+        .order_by(GlobalTeamMember.created_at)
+    ).all())
+    changed = False
+    for membership in memberships:
+        current_designation = membership.user.profile.professional_title if membership.user.profile else None
+        if current_designation and membership.designation != current_designation:
+            membership.designation = current_designation
+            changed = True
+    if changed:
+        db.commit()
+    return memberships
 
 
 @router.post("/teams/{team_id}/members", response_model=GlobalTeamMemberRead, status_code=201)
@@ -383,7 +409,7 @@ def add_global_team_member(team_id: int, payload: GlobalTeamMemberAdd, db: DB, c
         raise HTTPException(status_code=409, detail="Member is already in this team")
     membership = GlobalTeamMember(team_id=team_id, user_id=user.id, designation=user.profile.professional_title)
     db.add(membership); sync_scoped_conversation_access(db, user.id, active=True, team_id=team_id, global_team=True); db.commit(); db.refresh(membership)
-    return db.scalar(select(GlobalTeamMember).options(selectinload(GlobalTeamMember.user)).where(GlobalTeamMember.id == membership.id))
+    return db.scalar(select(GlobalTeamMember).options(selectinload(GlobalTeamMember.user).selectinload(User.profile)).where(GlobalTeamMember.id == membership.id))
 
 
 @router.delete("/teams/{team_id}/members/{membership_id}", status_code=204)

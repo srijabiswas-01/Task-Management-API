@@ -136,7 +136,6 @@ def get_conversation(db: DB, workspace_id: int, conversation_id: int, user_id: i
     member = membership(db, workspace_id, user_id)
     conversation = db.scalar(select(ChatConversation).options(
         selectinload(ChatConversation.participants).selectinload(ChatParticipant.user).selectinload(User.profile),
-        selectinload(ChatConversation.messages).selectinload(ChatMessage.sender).selectinload(User.profile),
     ).where(ChatConversation.id == conversation_id, ChatConversation.workspace_id == workspace_id))
     if conversation is None or not can_access(db, conversation, member, user_id):
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -173,6 +172,43 @@ def conversation_read(
             display_name = other.name
     return ChatConversationRead(
         id=conversation.id, workspace_id=conversation.workspace_id, scope_type=conversation.scope_type, chat_type=conversation.chat_type,
+        name=display_name, project_id=conversation.project_id, team_id=conversation.team_id,
+        participants=[user_read(item.user) for item in conversation.participants],
+        last_message=message_read(last_message) if last_message else None,
+        unread_count=unread, can_send=can_send, can_clear=clear_allowed,
+    )
+
+
+def conversation_summary_read(
+    db: DB, conversation: ChatConversation, user_id: int, can_send: bool = True,
+    clear_allowed: bool = False,
+) -> ChatConversationRead:
+    """Build a list row without transferring the complete message history."""
+    participant = next((item for item in conversation.participants if item.user_id == user_id), None)
+    last_read = participant.last_read_at if participant else None
+    cutoff = participant.access_revoked_at if participant else None
+    message_filters = [ChatMessage.conversation_id == conversation.id]
+    if cutoff is not None:
+        message_filters.append(ChatMessage.created_at <= cutoff)
+    unread_filters = [*message_filters, ChatMessage.sender_id != user_id]
+    if last_read is not None:
+        unread_filters.append(ChatMessage.created_at > last_read)
+    unread = db.scalar(select(func.count(ChatMessage.id)).where(*unread_filters)) or 0
+    last_message = db.scalar(
+        select(ChatMessage)
+        .options(selectinload(ChatMessage.sender).selectinload(User.profile))
+        .where(*message_filters)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(1)
+    )
+    display_name = conversation.name
+    if conversation.chat_type == ChatType.direct:
+        other = next((item.user for item in conversation.participants if item.user_id != user_id), None)
+        if other is not None:
+            display_name = other.name
+    return ChatConversationRead(
+        id=conversation.id, workspace_id=conversation.workspace_id,
+        scope_type=conversation.scope_type, chat_type=conversation.chat_type,
         name=display_name, project_id=conversation.project_id, team_id=conversation.team_id,
         participants=[user_read(item.user) for item in conversation.participants],
         last_message=message_read(last_message) if last_message else None,
@@ -227,13 +263,12 @@ def list_conversations(workspace_id: int, db: DB, current_user: CurrentUser) -> 
     member = membership(db, workspace_id, current_user.id)
     conversations = list(db.scalars(select(ChatConversation).options(
         selectinload(ChatConversation.participants).selectinload(ChatParticipant.user).selectinload(User.profile),
-        selectinload(ChatConversation.messages).selectinload(ChatMessage.sender).selectinload(User.profile),
     ).where(ChatConversation.workspace_id == workspace_id).order_by(ChatConversation.updated_at.desc())).unique().all())
     visible = [item for item in conversations if can_access(db, item, member, current_user.id)]
     for item in visible:
         ensure_read_cursor(db, item, current_user.id, has_current_scope_access(db, item, member, current_user.id))
-    return [conversation_read(
-        item, current_user.id,
+    return [conversation_summary_read(
+        db, item, current_user.id,
         has_current_scope_access(db, item, member, current_user.id) and (item.chat_type != ChatType.broadcast or is_admin(member)),
         can_clear(db, item, member, current_user.id),
     ) for item in visible]
@@ -259,7 +294,7 @@ def create_conversation(workspace_id: int, payload: ChatConversationCreate, db: 
             raise HTTPException(status_code=403, detail="You can only create chats for projects you manage")
         existing = db.scalar(select(ChatConversation).where(ChatConversation.workspace_id == workspace_id, ChatConversation.project_id == project.id, ChatConversation.chat_type == ChatType.project))
         if existing:
-            return conversation_read(get_conversation(db, workspace_id, existing.id, current_user.id)[0], current_user.id)
+            return conversation_summary_read(db, get_conversation(db, workspace_id, existing.id, current_user.id)[0], current_user.id)
         project_id, name = project.id, payload.name or f"{project.name} project"
     elif payload.chat_type == ChatType.team:
         team = db.get(Team, payload.team_id) if payload.team_id else None
@@ -269,7 +304,7 @@ def create_conversation(workspace_id: int, payload: ChatConversationCreate, db: 
             raise HTTPException(status_code=403, detail="You can only create chats for teams you manage")
         existing = db.scalar(select(ChatConversation).where(ChatConversation.workspace_id == workspace_id, ChatConversation.team_id == team.id, ChatConversation.chat_type == ChatType.team))
         if existing:
-            return conversation_read(get_conversation(db, workspace_id, existing.id, current_user.id)[0], current_user.id)
+            return conversation_summary_read(db, get_conversation(db, workspace_id, existing.id, current_user.id)[0], current_user.id)
         team_id, name = team.id, payload.name or f"{team.name} team"
     else:
         options = chat_options(workspace_id, db, current_user)
@@ -282,14 +317,14 @@ def create_conversation(workspace_id: int, payload: ChatConversationCreate, db: 
         for conversation_id in direct_ids:
             ids = set(db.scalars(select(ChatParticipant.user_id).where(ChatParticipant.conversation_id == conversation_id)).all())
             if ids == participants:
-                return conversation_read(get_conversation(db, workspace_id, conversation_id, current_user.id)[0], current_user.id)
+                return conversation_summary_read(db, get_conversation(db, workspace_id, conversation_id, current_user.id)[0], current_user.id)
         name = payload.name or recipient.name
     conversation = ChatConversation(workspace_id=workspace_id, chat_type=payload.chat_type, name=name.strip(), created_by_id=current_user.id, project_id=project_id, team_id=team_id)
     db.add(conversation); db.flush()
     if payload.chat_type == ChatType.direct:
         db.add_all([ChatParticipant(conversation_id=conversation.id, user_id=user_id) for user_id in participants])
     db.commit()
-    return conversation_read(get_conversation(db, workspace_id, conversation.id, current_user.id)[0], current_user.id, payload.chat_type != ChatType.broadcast or admin)
+    return conversation_summary_read(db, get_conversation(db, workspace_id, conversation.id, current_user.id)[0], current_user.id, payload.chat_type != ChatType.broadcast or admin)
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=list[ChatMessageRead])
@@ -306,7 +341,18 @@ def list_messages(workspace_id: int, conversation_id: int, db: DB, current_user:
         ).values(is_read=True)
     )
     db.commit()
-    messages = sorted(visible_messages(conversation, current_user.id), key=lambda item: item.created_at)[-limit:]
+    cutoff = participant.access_revoked_at if participant else None
+    filters = [ChatMessage.conversation_id == conversation.id]
+    if cutoff is not None:
+        filters.append(ChatMessage.created_at <= cutoff)
+    messages = list(db.scalars(
+        select(ChatMessage)
+        .options(selectinload(ChatMessage.sender).selectinload(User.profile))
+        .where(*filters)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit)
+    ).all())
+    messages.reverse()
     return [message_read(item) for item in messages]
 
 
@@ -450,7 +496,6 @@ def has_current_global_access(db: DB, conversation: ChatConversation, user: User
 def global_chat(db: DB, conversation_id: int, user: User) -> ChatConversation:
     conversation = db.scalar(select(ChatConversation).options(
         selectinload(ChatConversation.participants).selectinload(ChatParticipant.user).selectinload(User.profile),
-        selectinload(ChatConversation.messages).selectinload(ChatMessage.sender).selectinload(User.profile),
     ).where(ChatConversation.id == conversation_id, ChatConversation.workspace_id.is_(None)))
     if conversation is None or not global_chat_access(db, conversation, user): raise HTTPException(status_code=404, detail="Conversation not found")
     ensure_read_cursor(db, conversation, user.id, has_current_global_access(db, conversation, user))
@@ -461,11 +506,10 @@ def global_chat(db: DB, conversation_id: int, user: User) -> ChatConversation:
 def list_global_conversations(db: DB, current_user: CurrentUser) -> list[ChatConversationRead]:
     conversations = list(db.scalars(select(ChatConversation).options(
         selectinload(ChatConversation.participants).selectinload(ChatParticipant.user).selectinload(User.profile),
-        selectinload(ChatConversation.messages).selectinload(ChatMessage.sender).selectinload(User.profile),
     ).where(ChatConversation.workspace_id.is_(None)).order_by(ChatConversation.updated_at.desc())).unique().all())
     visible = [item for item in conversations if global_chat_access(db, item, current_user)]
     for item in visible: ensure_read_cursor(db, item, current_user.id, has_current_global_access(db, item, current_user))
-    return [conversation_read(item, current_user.id, has_current_global_access(db, item, current_user) and (item.scope_type != "global" or current_user.is_system_admin), current_user.is_system_admin or (item.scope_type == "team" and bool(db.scalar(select(TeamManager.id).where(TeamManager.team_id == item.team_id, TeamManager.user_id == current_user.id))))) for item in visible]
+    return [conversation_summary_read(db, item, current_user.id, has_current_global_access(db, item, current_user) and (item.scope_type != "global" or current_user.is_system_admin), current_user.is_system_admin or (item.scope_type == "team" and bool(db.scalar(select(TeamManager.id).where(TeamManager.team_id == item.team_id, TeamManager.user_id == current_user.id))))) for item in visible]
 
 
 @global_router.get("/options", response_model=ChatOptionsRead)
@@ -492,7 +536,7 @@ def create_global_conversation(payload: ChatConversationCreate, db: DB, current_
     if payload.chat_type == ChatType.broadcast:
         if not current_user.is_system_admin: raise HTTPException(status_code=403, detail="System administrator access required")
         existing=db.scalar(select(ChatConversation).where(ChatConversation.workspace_id.is_(None),ChatConversation.scope_type=="global",ChatConversation.chat_type==ChatType.broadcast))
-        if existing:return conversation_read(global_chat(db,existing.id,current_user),current_user.id,True,True)
+        if existing:return conversation_summary_read(db,global_chat(db,existing.id,current_user),current_user.id,True,True)
         scope,name="global",payload.name or "Company announcements"
     elif payload.chat_type == ChatType.team:
         team=db.get(Team,payload.team_id) if payload.team_id else None
@@ -500,19 +544,19 @@ def create_global_conversation(payload: ChatConversationCreate, db: DB, current_
         if not current_user.is_system_admin and not db.scalar(select(TeamManager.id).where(TeamManager.team_id==team.id,TeamManager.user_id==current_user.id)):
             raise HTTPException(status_code=403,detail="Only the team manager or an administrator can create the team conversation")
         existing=db.scalar(select(ChatConversation).where(ChatConversation.workspace_id.is_(None),ChatConversation.team_id==team.id,ChatConversation.scope_type=="team"))
-        if existing:return conversation_read(global_chat(db,existing.id,current_user),current_user.id,True)
+        if existing:return conversation_summary_read(db,global_chat(db,existing.id,current_user),current_user.id,True)
         scope,team_id,name="team",team.id,payload.name or f"{team.name} team"
     elif payload.chat_type == ChatType.direct:
         allowed={item.id for item in global_chat_options(db,current_user).recipients}
         if payload.recipient_id not in allowed:raise HTTPException(status_code=403,detail="You cannot message this user directly")
         participants.add(payload.recipient_id); scope="direct"; name=payload.name or db.get(User,payload.recipient_id).name
         for conversation in db.scalars(select(ChatConversation).options(selectinload(ChatConversation.participants)).where(ChatConversation.workspace_id.is_(None),ChatConversation.scope_type=="direct")).all():
-            if {item.user_id for item in conversation.participants}==participants:return conversation_read(global_chat(db,conversation.id,current_user),current_user.id)
+            if {item.user_id for item in conversation.participants}==participants:return conversation_summary_read(db,global_chat(db,conversation.id,current_user),current_user.id)
     else:raise HTTPException(status_code=400,detail="Project conversations require a workspace")
     conversation=ChatConversation(workspace_id=None,scope_type=scope,chat_type=payload.chat_type,name=name.strip(),created_by_id=current_user.id,team_id=team_id)
     db.add(conversation);db.flush()
     if scope=="direct":db.add_all([ChatParticipant(conversation_id=conversation.id,user_id=item) for item in participants])
-    db.commit();return conversation_read(global_chat(db,conversation.id,current_user),current_user.id,scope!="global" or current_user.is_system_admin)
+    db.commit();return conversation_summary_read(db,global_chat(db,conversation.id,current_user),current_user.id,scope!="global" or current_user.is_system_admin)
 
 
 @global_router.get("/conversations/{conversation_id}/messages",response_model=list[ChatMessageRead])
@@ -520,7 +564,11 @@ def list_global_messages(conversation_id:int,db:DB,current_user:CurrentUser,limi
     conversation=global_chat(db,conversation_id,current_user);participant=next((item for item in conversation.participants if item.user_id==current_user.id),None)
     if participant:participant.last_read_at=datetime.now(timezone.utc)
     for alert in db.scalars(select(ChatNotification).where(ChatNotification.conversation_id==conversation.id,ChatNotification.user_id==current_user.id,ChatNotification.is_read.is_(False))).all():alert.is_read=True
-    db.commit();return [message_read(item) for item in sorted(visible_messages(conversation,current_user.id),key=lambda item:item.created_at)[-limit:]]
+    db.commit()
+    filters=[ChatMessage.conversation_id==conversation.id]
+    if participant and participant.access_revoked_at is not None:filters.append(ChatMessage.created_at<=participant.access_revoked_at)
+    messages=list(db.scalars(select(ChatMessage).options(selectinload(ChatMessage.sender).selectinload(User.profile)).where(*filters).order_by(ChatMessage.created_at.desc()).limit(limit)).all());messages.reverse()
+    return [message_read(item) for item in messages]
 
 
 @global_router.post("/conversations/{conversation_id}/messages",response_model=ChatMessageRead,status_code=201)
