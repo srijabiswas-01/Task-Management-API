@@ -1538,7 +1538,7 @@ def test_incomplete_profile_cannot_be_allocated_and_member_cannot_set_admin_fiel
     member_headers = {"Authorization": f"Bearer {login['access_token']}"}
     forbidden = client.put(
         "/auth/profile",
-        json={"name": "Incomplete Member", "professional_title": "Analyst", "department": "Operations"},
+        json={"name": "Incomplete Member", "professional_title": "Manager", "department": "Management"},
         headers=member_headers,
     )
     assert forbidden.status_code == 403

@@ -191,7 +191,8 @@ class ChatMessageRead(BaseModel):
 
 class ChatConversationRead(BaseModel):
     id: int
-    workspace_id: int
+    workspace_id: int | None = None
+    scope_type: str = "workspace"
     chat_type: ChatType
     name: str
     project_id: int | None
@@ -366,6 +367,18 @@ class TeamMemberRead(ORMModel):
     weekly_capacity_hours: int = 40
     user: UserRead
     project: "ProjectRead"
+
+
+class GlobalTeamMemberAdd(BaseModel):
+    user_id: int
+
+
+class GlobalTeamMemberRead(ORMModel):
+    id: int
+    team_id: int
+    user_id: int
+    designation: str
+    user: UserRead
 
 
 class DateRangeModel(BaseModel):

@@ -1,12 +1,15 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.profile import profile_completion
+from app.core.chat_access import sync_scoped_conversation_access
 from app.core.skills import parse_skills
 from app.dependencies import CurrentUser, DB
-from app.models import Comment, GlobalAnnouncement, GlobalDepartment, GlobalDesignation, Project, Task, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceRole
-from app.schemas import DepartmentCreate, DepartmentRead, DepartmentUpdate, DesignationCreate, DesignationRead, DesignationUpdate, GlobalAnnouncementSend, GlobalMemberAssign, ProfileReminderResult, SkillMemberRead, TeamCreate, TeamMemberRead, TeamRead, TeamUpdate, UserDirectoryRead, UserProfileRead, UserProfileUpdate
+from app.models import ChatConversation, ChatMessage, ChatNotification, ChatParticipant, ChatType, Comment, GlobalAnnouncement, GlobalDepartment, GlobalDesignation, GlobalTeamMember, Project, Task, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceRole
+from app.schemas import DepartmentCreate, DepartmentRead, DepartmentUpdate, DesignationCreate, DesignationRead, DesignationUpdate, GlobalAnnouncementSend, GlobalMemberAssign, GlobalTeamMemberAdd, GlobalTeamMemberRead, ProfileReminderResult, SkillMemberRead, TeamCreate, TeamMemberRead, TeamRead, TeamUpdate, UserDirectoryRead, UserProfileRead, UserProfileUpdate
 
 router = APIRouter(prefix="/admin", tags=["System administration"])
 
@@ -68,8 +71,47 @@ def send_global_announcement(payload: GlobalAnnouncementSend, db: DB, current_us
     users = list(db.scalars(query).all())
     if payload.audience == "selected" and len(users) != len(set(payload.user_ids)):
         raise HTTPException(status_code=400, detail="Select active Members or Admins only")
+    title, body = payload.title.strip(), payload.message.strip()
     for user in users:
-        db.add(GlobalAnnouncement(user_id=user.id, sent_by_id=current_user.id, title=payload.title.strip(), message=payload.message.strip()))
+        db.add(GlobalAnnouncement(user_id=user.id, sent_by_id=current_user.id, title=title, message=body))
+    if payload.audience == "all":
+        conversation = db.scalar(select(ChatConversation).where(
+            ChatConversation.workspace_id.is_(None), ChatConversation.scope_type == "global",
+            ChatConversation.chat_type == ChatType.broadcast,
+        ))
+        if conversation is None:
+            conversation = ChatConversation(workspace_id=None, scope_type="global", chat_type=ChatType.broadcast,
+                name="Company announcements", created_by_id=current_user.id)
+            db.add(conversation); db.flush()
+        message = ChatMessage(conversation_id=conversation.id, sender_id=current_user.id,
+            body=f"{title}\n\n{body}" if title else body)
+        db.add(message); db.flush(); conversation.updated_at = datetime.now(timezone.utc)
+        for user in users:
+            if user.id != current_user.id:
+                db.add(ChatNotification(message_id=message.id, conversation_id=conversation.id, workspace_id=None,
+                    user_id=user.id, sender_id=current_user.id, title=title or conversation.name, message=body))
+    else:
+        for user in users:
+            participant_ids = {current_user.id, user.id}
+            conversation = None
+            candidates = db.scalars(select(ChatConversation).options(selectinload(ChatConversation.participants)).where(
+                ChatConversation.workspace_id.is_(None), ChatConversation.scope_type == "direct",
+                ChatConversation.chat_type == ChatType.direct,
+            )).all()
+            for candidate in candidates:
+                if {item.user_id for item in candidate.participants} == participant_ids:
+                    conversation = candidate; break
+            if conversation is None:
+                conversation = ChatConversation(workspace_id=None, scope_type="direct", chat_type=ChatType.direct,
+                    name=user.name, created_by_id=current_user.id)
+                db.add(conversation); db.flush()
+                db.add_all([ChatParticipant(conversation_id=conversation.id, user_id=user_id) for user_id in participant_ids])
+            message = ChatMessage(conversation_id=conversation.id, sender_id=current_user.id,
+                body=f"{title}\n\n{body}" if title else body)
+            db.add(message); db.flush(); conversation.updated_at = datetime.now(timezone.utc)
+            if user.id != current_user.id:
+                db.add(ChatNotification(message_id=message.id, conversation_id=conversation.id, workspace_id=None,
+                    user_id=user.id, sender_id=current_user.id, title=title or "Announcement", message=body))
     db.commit()
     return ProfileReminderResult(sent_count=len(users))
 
@@ -292,8 +334,13 @@ def update_global_team(team_id: int, payload: TeamUpdate, db: DB, current_user: 
     values = payload.model_dump(exclude_unset=True); manager_user_id = values.pop("manager_user_id", team.manager_user_id); values.pop("manager_designation", None)
     if manager_user_id is None: raise HTTPException(status_code=400, detail="Every team requires a designated manager")
     _, designation = global_team_manager(db, manager_user_id)
+    previous_manager_id = team.manager_user_id
     if team.manager_record is None: team.manager_record = TeamManager()
     team.manager_record.user_id = manager_user_id; team.manager_record.designation = designation.strip()
+    if previous_manager_id != manager_user_id:
+        sync_scoped_conversation_access(db, manager_user_id, active=True, team_id=team.id, global_team=True)
+        if previous_manager_id and not db.scalar(select(GlobalTeamMember.id).where(GlobalTeamMember.team_id == team.id, GlobalTeamMember.user_id == previous_manager_id)):
+            sync_scoped_conversation_access(db, previous_manager_id, active=False, team_id=team.id, global_team=True)
     for field, value in values.items(): setattr(team, field, value.strip() if isinstance(value, str) else value)
     db.commit(); db.refresh(team)
     return team
@@ -311,3 +358,42 @@ def delete_global_team(team_id: int, db: DB, current_user: CurrentUser) -> None:
 def list_global_team_members(db: DB, current_user: CurrentUser) -> list[TeamMember]:
     require_system_admin(current_user)
     return list(db.scalars(select(TeamMember).options(selectinload(TeamMember.user), selectinload(TeamMember.project)).order_by(TeamMember.created_at)).all())
+
+
+@router.get("/global-team-members", response_model=list[GlobalTeamMemberRead])
+def list_global_team_memberships(db: DB, current_user: CurrentUser) -> list[GlobalTeamMember]:
+    require_system_admin(current_user)
+    return list(db.scalars(select(GlobalTeamMember).options(selectinload(GlobalTeamMember.user)).order_by(GlobalTeamMember.created_at)).all())
+
+
+@router.post("/teams/{team_id}/members", response_model=GlobalTeamMemberRead, status_code=201)
+def add_global_team_member(team_id: int, payload: GlobalTeamMemberAdd, db: DB, current_user: CurrentUser) -> GlobalTeamMember:
+    require_system_admin(current_user)
+    team = db.get(Team, team_id)
+    if team is None: raise HTTPException(status_code=404, detail="Team not found")
+    user = db.scalar(select(User).options(selectinload(User.profile)).where(User.id == payload.user_id, User.is_active.is_(True), User.is_member.is_(True)))
+    if user is None: raise HTTPException(status_code=400, detail="Select an active Member or Admin")
+    completion, _ = profile_completion(user, user.profile)
+    if completion < 50: raise HTTPException(status_code=400, detail=f"This member's profile is only {completion}% complete. At least 50% profile completion is required before team allocation.")
+    if not user.profile or not user.profile.department or not user.profile.professional_title:
+        raise HTTPException(status_code=400, detail="Assign the member's department and designation first")
+    valid = db.scalar(select(GlobalDesignation.id).join(GlobalDepartment).where(GlobalDesignation.name == user.profile.professional_title, GlobalDepartment.name == user.profile.department))
+    if valid is None: raise HTTPException(status_code=400, detail="Assign a valid department and designation first")
+    if db.scalar(select(GlobalTeamMember.id).where(GlobalTeamMember.team_id == team_id, GlobalTeamMember.user_id == user.id)):
+        raise HTTPException(status_code=409, detail="Member is already in this team")
+    membership = GlobalTeamMember(team_id=team_id, user_id=user.id, designation=user.profile.professional_title)
+    db.add(membership); sync_scoped_conversation_access(db, user.id, active=True, team_id=team_id, global_team=True); db.commit(); db.refresh(membership)
+    return db.scalar(select(GlobalTeamMember).options(selectinload(GlobalTeamMember.user)).where(GlobalTeamMember.id == membership.id))
+
+
+@router.delete("/teams/{team_id}/members/{membership_id}", status_code=204)
+def remove_global_team_member(team_id: int, membership_id: int, db: DB, current_user: CurrentUser) -> None:
+    require_system_admin(current_user)
+    membership = db.scalar(select(GlobalTeamMember).where(GlobalTeamMember.id == membership_id, GlobalTeamMember.team_id == team_id))
+    if membership is None: raise HTTPException(status_code=404, detail="Team member not found")
+    user_id = membership.user_id
+    db.delete(membership); db.flush()
+    still_manager = db.scalar(select(TeamManager.id).where(TeamManager.team_id == team_id, TeamManager.user_id == user_id))
+    if not still_manager:
+        sync_scoped_conversation_access(db, user_id, active=False, team_id=team_id, global_team=True)
+    db.commit()

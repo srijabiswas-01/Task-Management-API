@@ -306,6 +306,19 @@ class TeamMember(TimestampMixin, Base):
     project: Mapped["Project"] = relationship()
 
 
+class GlobalTeamMember(TimestampMixin, Base):
+    __tablename__ = "global_team_members"
+    __table_args__ = (UniqueConstraint("team_id", "user_id", name="uq_global_team_user"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    designation: Mapped[str] = mapped_column(String(120))
+
+    team: Mapped["Team"] = relationship()
+    user: Mapped["User"] = relationship()
+
+
 class Project(TimestampMixin, Base):
     __tablename__ = "projects"
 
@@ -345,14 +358,15 @@ class ChatConversation(TimestampMixin, Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True, nullable=True)
+    scope_type: Mapped[str] = mapped_column(String(20), default="workspace", index=True)
     chat_type: Mapped[ChatType] = mapped_column(SqlEnum(ChatType), index=True)
     name: Mapped[str] = mapped_column(String(180))
     created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
 
-    workspace: Mapped["Workspace"] = relationship(back_populates="chat_conversations")
+    workspace: Mapped["Workspace | None"] = relationship(back_populates="chat_conversations")
     project: Mapped["Project | None"] = relationship()
     team: Mapped["Team | None"] = relationship()
     creator: Mapped["User"] = relationship(foreign_keys=[created_by_id])
@@ -368,6 +382,7 @@ class ChatParticipant(TimestampMixin, Base):
     conversation_id: Mapped[int] = mapped_column(ForeignKey("chat_conversations.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     last_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    access_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     conversation: Mapped["ChatConversation"] = relationship(back_populates="participants")
     user: Mapped["User"] = relationship()
@@ -394,7 +409,7 @@ class ChatNotification(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     message_id: Mapped[int] = mapped_column(ForeignKey("chat_messages.id", ondelete="CASCADE"), index=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey("chat_conversations.id", ondelete="CASCADE"), index=True)
-    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True, nullable=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     sender_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     title: Mapped[str] = mapped_column(String(220))

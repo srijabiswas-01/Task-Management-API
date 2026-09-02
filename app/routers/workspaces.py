@@ -13,6 +13,7 @@ from app.dependencies import (
 )
 from app.core.skills import normalize_skills, parse_skills
 from app.core.profile import profile_completion, validate_profile_image
+from app.core.chat_access import sync_scoped_conversation_access
 from app.models import ChatConversation, ChatParticipant, ChatType, Comment, Department, Designation, GlobalDepartment, GlobalDesignation, Project, Task, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     MemberAdd,
@@ -863,10 +864,15 @@ def update_team(
     if manager_user_id is None:
         raise HTTPException(status_code=400, detail="Every team requires a designated manager")
     manager_designation = validate_team_manager(db, workspace_id, manager_user_id, manager_designation)
+    previous_manager_id = team.manager_user_id
     if team.manager_record is None:
         team.manager_record = TeamManager()
     team.manager_record.user_id = manager_user_id
     team.manager_record.designation = manager_designation.strip()
+    if previous_manager_id != manager_user_id:
+        sync_scoped_conversation_access(db, manager_user_id, active=True, team_id=team.id)
+        if previous_manager_id and not db.scalar(select(TeamMember.id).where(TeamMember.team_id == team.id, TeamMember.user_id == previous_manager_id)):
+            sync_scoped_conversation_access(db, previous_manager_id, active=False, team_id=team.id)
     for field, value in values.items():
         setattr(team, field, value.strip() if isinstance(value, str) else value)
     db.commit(); db.refresh(team)
@@ -920,6 +926,12 @@ def remove_member(
     )
     for allocation in allocations:
         db.delete(allocation)
+    db.flush()
+    for allocation in allocations:
+        if not db.scalar(select(TeamMember.id).where(TeamMember.user_id == member.user_id, TeamMember.project_id == allocation.project_id)):
+            sync_scoped_conversation_access(db, member.user_id, active=False, project_id=allocation.project_id)
+        if not db.scalar(select(TeamMember.id).where(TeamMember.user_id == member.user_id, TeamMember.team_id == allocation.team_id)):
+            sync_scoped_conversation_access(db, member.user_id, active=False, team_id=allocation.team_id)
     db.delete(member)
     db.commit()
 
@@ -1031,6 +1043,8 @@ def allocate_team_member(
         designation=designation.name,
     )
     db.add(allocation)
+    sync_scoped_conversation_access(db, payload.user_id, active=True, project_id=payload.project_id)
+    sync_scoped_conversation_access(db, payload.user_id, active=True, team_id=team_id)
     db.commit()
     return db.scalar(
         select(TeamMember)
@@ -1093,8 +1107,14 @@ def update_team_member_allocation(
     ))
     if duplicate is not None:
         raise HTTPException(status_code=409, detail="Member is already allocated to this project")
+    previous_project_id = allocation.project_id
     allocation.project_id = project.id
     allocation.designation = designation.name
+    if previous_project_id != project.id:
+        db.flush()
+        if not db.scalar(select(TeamMember.id).where(TeamMember.user_id == allocation.user_id, TeamMember.project_id == previous_project_id, TeamMember.id != allocation.id)):
+            sync_scoped_conversation_access(db, allocation.user_id, active=False, project_id=previous_project_id)
+        sync_scoped_conversation_access(db, allocation.user_id, active=True, project_id=project.id)
     db.commit()
     return db.scalar(select(TeamMember).options(
         selectinload(TeamMember.user), selectinload(TeamMember.project)
@@ -1125,5 +1145,10 @@ def remove_team_member(
     )
     if allocation is None:
         raise HTTPException(status_code=404, detail="Team member not found")
-    db.delete(allocation)
+    user_id, project_id = allocation.user_id, allocation.project_id
+    db.delete(allocation); db.flush()
+    if not db.scalar(select(TeamMember.id).where(TeamMember.user_id == user_id, TeamMember.project_id == project_id)):
+        sync_scoped_conversation_access(db, user_id, active=False, project_id=project_id)
+    if not db.scalar(select(TeamMember.id).where(TeamMember.user_id == user_id, TeamMember.team_id == team_id)) and not db.scalar(select(TeamManager.id).where(TeamManager.user_id == user_id, TeamManager.team_id == team_id)):
+        sync_scoped_conversation_access(db, user_id, active=False, team_id=team_id)
     db.commit()

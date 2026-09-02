@@ -55,6 +55,9 @@ async def lifespan(_: FastAPI):
     team_member_columns = {column["name"] for column in inspect(engine).get_columns("team_members")}
     team_columns = {column["name"]: column for column in inspect(engine).get_columns("teams")}
     chat_message_columns = {column["name"] for column in inspect(engine).get_columns("chat_messages")} if inspect(engine).has_table("chat_messages") else set()
+    chat_participant_columns = {column["name"] for column in inspect(engine).get_columns("chat_participants")} if inspect(engine).has_table("chat_participants") else set()
+    chat_conversation_columns = {column["name"]: column for column in inspect(engine).get_columns("chat_conversations")} if inspect(engine).has_table("chat_conversations") else {}
+    chat_notification_columns = {column["name"]: column for column in inspect(engine).get_columns("chat_notifications")} if inspect(engine).has_table("chat_notifications") else {}
     designation_columns = {column["name"] for column in inspect(engine).get_columns("global_designations")}
     profile_columns = {column["name"] for column in inspect(engine).get_columns("user_profiles")}
     if team_columns.get("workspace_id") and not team_columns["workspace_id"].get("nullable", True):
@@ -71,7 +74,37 @@ async def lifespan(_: FastAPI):
                 connection.execute(text("ALTER TABLE teams ALTER COLUMN workspace_id DROP NOT NULL"))
                 connection.execute(text("ALTER TABLE teams DROP CONSTRAINT IF EXISTS teams_workspace_id_fkey"))
                 connection.execute(text("ALTER TABLE teams ADD CONSTRAINT teams_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL"))
+    if engine.dialect.name == "sqlite" and chat_conversation_columns.get("workspace_id") and not chat_conversation_columns["workspace_id"].get("nullable", True):
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            connection.execute(text("PRAGMA foreign_keys=OFF"))
+            connection.execute(text("CREATE TABLE chat_conversations_globalized (id INTEGER NOT NULL PRIMARY KEY, workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE, scope_type VARCHAR(20) NOT NULL DEFAULT 'workspace', chat_type VARCHAR(20) NOT NULL, name VARCHAR(180) NOT NULL, created_by_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, CONSTRAINT uq_project_chat UNIQUE (workspace_id, project_id, chat_type), CONSTRAINT uq_team_chat UNIQUE (workspace_id, team_id, chat_type))"))
+            scope_value = "scope_type" if "scope_type" in chat_conversation_columns else "'workspace'"
+            connection.execute(text(f"INSERT INTO chat_conversations_globalized (id,workspace_id,scope_type,chat_type,name,created_by_id,project_id,team_id,created_at,updated_at) SELECT id,workspace_id,{scope_value},chat_type,name,created_by_id,project_id,team_id,created_at,updated_at FROM chat_conversations"))
+            connection.execute(text("DROP TABLE chat_conversations")); connection.execute(text("ALTER TABLE chat_conversations_globalized RENAME TO chat_conversations")); connection.execute(text("PRAGMA foreign_keys=ON"))
+        chat_conversation_columns["scope_type"] = {"name": "scope_type"}
+    elif engine.dialect.name != "sqlite" and chat_conversation_columns.get("workspace_id") and not chat_conversation_columns["workspace_id"].get("nullable", True):
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE chat_conversations ALTER COLUMN workspace_id DROP NOT NULL"))
+    if engine.dialect.name == "sqlite" and chat_notification_columns.get("workspace_id") and not chat_notification_columns["workspace_id"].get("nullable", True):
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            connection.execute(text("PRAGMA foreign_keys=OFF"))
+            connection.execute(text("CREATE TABLE chat_notifications_globalized (id INTEGER NOT NULL PRIMARY KEY, message_id INTEGER NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE, conversation_id INTEGER NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE, workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, title VARCHAR(220) NOT NULL, message TEXT NOT NULL, is_read BOOLEAN NOT NULL DEFAULT 0, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, CONSTRAINT uq_chat_message_recipient UNIQUE (message_id,user_id))"))
+            connection.execute(text("INSERT INTO chat_notifications_globalized SELECT id,message_id,conversation_id,workspace_id,user_id,sender_id,title,message,is_read,created_at,updated_at FROM chat_notifications")); connection.execute(text("DROP TABLE chat_notifications")); connection.execute(text("ALTER TABLE chat_notifications_globalized RENAME TO chat_notifications")); connection.execute(text("PRAGMA foreign_keys=ON"))
+    elif engine.dialect.name != "sqlite" and chat_notification_columns.get("workspace_id") and not chat_notification_columns["workspace_id"].get("nullable", True):
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE chat_notifications ALTER COLUMN workspace_id DROP NOT NULL"))
     with engine.begin() as connection:
+        if "scope_type" not in chat_conversation_columns:
+            connection.execute(text("ALTER TABLE chat_conversations ADD COLUMN scope_type VARCHAR(20) NOT NULL DEFAULT 'workspace'"))
+        if "access_revoked_at" not in chat_participant_columns:
+            if engine.dialect.name == "sqlite":
+                connection.execute(text("ALTER TABLE chat_participants ADD COLUMN access_revoked_at DATETIME"))
+            else:
+                connection.execute(text("ALTER TABLE chat_participants ADD COLUMN IF NOT EXISTS access_revoked_at TIMESTAMP WITH TIME ZONE"))
+        if engine.dialect.name == "sqlite":
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_chat_conversations_workspace_id ON chat_conversations (workspace_id)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_chat_conversations_scope_type ON chat_conversations (scope_type)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_chat_notifications_workspace_id ON chat_notifications (workspace_id)"))
         if "phone_country_code" in profile_columns:
             connection.execute(text("ALTER TABLE user_profiles DROP COLUMN phone_country_code"))
         if "start_date" not in project_columns:
@@ -182,6 +215,7 @@ app.include_router(boards.router)
 app.include_router(ai.router)
 app.include_router(notifications.router)
 app.include_router(chat.router)
+app.include_router(chat.global_router)
 app.include_router(admin.router)
 
 frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
