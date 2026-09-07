@@ -275,18 +275,46 @@ class SkillMemberRead(BaseModel):
     profile_image: str | None = None
     skills: list[str] = Field(default_factory=list)
     project_ids: list[int] = Field(default_factory=list)
+    team_id: int | None = None
+    team_name: str | None = None
+    completion_percent: int = 0
+    total_active_tasks: int = 0
+    hourly_rate: int = 0
+    is_eligible: bool = False
+    eligibility_reason: str | None = None
+
+
+class GlobalSkillCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class GlobalSkillUpdate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class GlobalSkillRead(ORMModel):
+    id: int
+    name: str
+    description: str | None = None
+    usage_count: int = 0
+    created_at: datetime
+    updated_at: datetime
 
 
 class DesignationCreate(BaseModel):
     department_id: int
     name: str = Field(min_length=2, max_length=120)
     description: str | None = Field(default=None, max_length=1000)
+    hourly_rate: int = Field(default=0, ge=0, le=1000000)
 
 
 class DesignationUpdate(BaseModel):
     department_id: int | None = None
     name: str | None = Field(default=None, min_length=2, max_length=120)
     description: str | None = Field(default=None, max_length=1000)
+    hourly_rate: int | None = Field(default=None, ge=0, le=1000000)
 
 
 class DesignationRead(ORMModel):
@@ -294,6 +322,7 @@ class DesignationRead(ORMModel):
     workspace_id: int | None = None
     name: str
     description: str | None
+    hourly_rate: int = 0
     department_id: int | None = None
     department_name: str | None = None
     created_at: datetime
@@ -315,6 +344,20 @@ class DepartmentRead(ORMModel):
     name: str
     description: str | None
     created_at: datetime
+
+
+class HolidayCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=150)
+    holiday_date: date
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class HolidayRead(ORMModel):
+    id: int
+    name: str
+    holiday_date: date
+    description: str | None = None
+    is_active: bool
 
 
 class TeamCreate(BaseModel):
@@ -463,6 +506,20 @@ class SprintUpdate(DateRangeModel):
     is_active: bool | None = None
 
 
+class TaskAssignmentInput(BaseModel):
+    user_id: int
+    team_id: int
+    responsibility: str | None = Field(default=None, max_length=500)
+    planned_hours: int | None = Field(default=None, ge=0, le=5000)
+
+
+class TaskAssignmentRead(ORMModel):
+    user_id: int
+    team_id: int | None = None
+    responsibility: str | None = None
+    planned_hours: int | None = None
+
+
 class TaskCreate(BaseModel):
     title: str = Field(min_length=2, max_length=220)
     description: str | None = None
@@ -471,8 +528,11 @@ class TaskCreate(BaseModel):
     status: TaskStatus = TaskStatus.backlog
     assignee_id: int | None = None
     assignee_ids: list[int] = Field(default_factory=list)
+    assignments: list[TaskAssignmentInput] = Field(default_factory=list, max_length=100)
+    checklist: list[str] = Field(default_factory=list, max_length=50)
     story_points: int | None = Field(default=None, ge=0, le=100)
     estimated_hours: int | None = Field(default=None, ge=0, le=5000)
+    estimated_days: int | None = Field(default=None, ge=0, le=1000)
     planned_budget: int | None = Field(default=None, ge=0)
     actual_cost: int | None = Field(default=None, ge=0)
     start_date: date | None = None
@@ -498,8 +558,10 @@ class TaskUpdate(BaseModel):
     status: TaskStatus | None = None
     assignee_id: int | None = None
     assignee_ids: list[int] | None = None
+    assignments: list[TaskAssignmentInput] | None = None
     story_points: int | None = Field(default=None, ge=0, le=100)
     estimated_hours: int | None = Field(default=None, ge=0, le=5000)
+    estimated_days: int | None = Field(default=None, ge=0, le=1000)
     planned_budget: int | None = Field(default=None, ge=0)
     actual_cost: int | None = Field(default=None, ge=0)
     start_date: date | None = None
@@ -531,9 +593,11 @@ class TaskRead(ORMModel):
     status: TaskStatus
     assignee_id: int | None
     assignee_ids: list[int] = Field(default_factory=list)
+    assignments: list[TaskAssignmentRead] = Field(default_factory=list)
     reporter_id: int
     story_points: int | None
     estimated_hours: int | None = None
+    estimated_days: int | None = None
     planned_budget: int | None = None
     actual_cost: int | None = None
     start_date: date | None
@@ -550,7 +614,9 @@ class TaskRead(ORMModel):
 class AITaskPlanRequest(BaseModel):
     prompt: str = Field(min_length=10, max_length=4000)
     maximum_tasks: int = Field(default=20, ge=1, le=20)
-    team_id: int
+    team_ids: list[int] = Field(default_factory=list, max_length=50)
+    # Retained for compatibility with older API clients.
+    team_id: int | None = None
 
 
 class AIGeneratedTask(BaseModel):
@@ -559,8 +625,11 @@ class AIGeneratedTask(BaseModel):
     priority: Priority = Priority.medium
     story_points: int | None = Field(default=None, ge=0, le=100)
     estimated_hours: int | None = Field(default=None, ge=0, le=5000)
+    estimated_days: int | None = Field(default=None, ge=0, le=1000)
     planned_budget: int | None = Field(default=None, ge=0)
+    team_ids: list[int] = Field(default_factory=list, max_length=50)
     assignee_ids: list[int] = Field(default_factory=list)
+    assignments: list[TaskAssignmentInput] = Field(default_factory=list, max_length=100)
     start_date: date | None = None
     end_date: date | None = None
     checklist: list[str] = Field(default_factory=list, max_length=20)
@@ -631,6 +700,11 @@ class DashboardSummary(BaseModel):
     completed_tasks: int
     overdue_tasks: int
     completion_percent: float
+
+
+class WorkspaceOverviewRead(BaseModel):
+    projects: list[ProjectRead]
+    dashboard: DashboardSummary
 
 
 class BoardSetup(BaseModel):

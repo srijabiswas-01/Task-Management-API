@@ -213,6 +213,7 @@ class GlobalDesignation(TimestampMixin, Base):
         ForeignKey("global_departments.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(120), index=True)
+    hourly_rate: Mapped[int] = mapped_column(Integer, default=0)
     description: Mapped[str | None] = mapped_column(Text)
     department: Mapped["GlobalDepartment | None"] = relationship(back_populates="designations")
 
@@ -230,6 +231,14 @@ class GlobalDepartment(TimestampMixin, Base):
     designations: Mapped[list["GlobalDesignation"]] = relationship(
         back_populates="department", cascade="all, delete-orphan"
     )
+
+
+class GlobalSkill(TimestampMixin, Base):
+    __tablename__ = "global_skills"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(Text)
 
 
 class Team(TimestampMixin, Base):
@@ -271,7 +280,7 @@ class TeamManager(TimestampMixin, Base):
         ForeignKey("teams.id", ondelete="CASCADE"), unique=True, index=True
     )
     user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
     )
     designation: Mapped[str] = mapped_column(String(120))
 
@@ -308,7 +317,8 @@ class TeamMember(TimestampMixin, Base):
 
 class GlobalTeamMember(TimestampMixin, Base):
     __tablename__ = "global_team_members"
-    __table_args__ = (UniqueConstraint("team_id", "user_id", name="uq_global_team_user"),)
+    # Team membership is global: a person can belong to one team only.
+    __table_args__ = (UniqueConstraint("user_id", name="uq_global_team_member_user"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     team_id: Mapped[int] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
@@ -458,6 +468,7 @@ class Task(TimestampMixin, Base):
     reporter_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     story_points: Mapped[int | None] = mapped_column(Integer)
     estimated_hours: Mapped[int | None] = mapped_column(Integer)
+    estimated_days: Mapped[int | None] = mapped_column(Integer)
     planned_budget: Mapped[int | None] = mapped_column(Integer)
     actual_cost: Mapped[int | None] = mapped_column(Integer)
     start_date: Mapped[date | None] = mapped_column(Date)
@@ -484,6 +495,10 @@ class Task(TimestampMixin, Base):
     @property
     def assignee_ids(self) -> list[int]:
         return [item.user_id for item in self.task_assignees]
+
+    @property
+    def assignments(self) -> list["TaskAssignee"]:
+        return self.task_assignees
 
     @property
     def start_at(self) -> datetime | None:
@@ -580,8 +595,23 @@ class TaskAssignee(TimestampMixin, Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
+    team_id: Mapped[int | None] = mapped_column(
+        ForeignKey("teams.id", ondelete="SET NULL"), index=True
+    )
+    responsibility: Mapped[str | None] = mapped_column(String(500))
+    planned_hours: Mapped[int | None] = mapped_column(Integer)
 
     task: Mapped["Task"] = relationship(back_populates="task_assignees")
+
+
+class OrganizationHoliday(TimestampMixin, Base):
+    __tablename__ = "organization_holidays"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(150))
+    holiday_date: Mapped[date] = mapped_column(Date, unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class TaskSchedule(TimestampMixin, Base):

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.dependencies import CurrentUser, DB, require_project_admin
 from app.models import (
     BoardColumn,
+    ChecklistItem,
     Project,
     ProjectBoard,
     Task,
@@ -415,6 +416,12 @@ def move_task(
         for index, old_item in enumerate(old_items):
             old_item.position = index
     if target.system_status in {status.value for status in TaskStatus}:
+        checklist_items = list(db.scalars(select(ChecklistItem).where(ChecklistItem.task_id == task.id)).all())
+        if target.system_status == TaskStatus.done.value:
+            if checklist_items and any(not checklist.is_done for checklist in checklist_items):
+                raise HTTPException(status_code=409, detail="Complete all checklist items before moving this task to Done")
+        elif checklist_items and all(checklist.is_done for checklist in checklist_items):
+            raise HTTPException(status_code=409, detail="Reopen a checklist item before moving this completed task out of Done")
         task.status = TaskStatus(target.system_status)
         if task.status == TaskStatus.done:
             task.progress = 100

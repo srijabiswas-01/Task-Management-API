@@ -8,8 +8,8 @@ from app.core.profile import profile_completion
 from app.core.chat_access import sync_scoped_conversation_access
 from app.core.skills import parse_skills
 from app.dependencies import CurrentUser, DB
-from app.models import ChatConversation, ChatMessage, ChatNotification, ChatParticipant, ChatType, Comment, GlobalAnnouncement, GlobalDepartment, GlobalDesignation, GlobalTeamMember, Project, Task, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceRole
-from app.schemas import DepartmentCreate, DepartmentRead, DepartmentUpdate, DesignationCreate, DesignationRead, DesignationUpdate, GlobalAnnouncementSend, GlobalMemberAssign, GlobalTeamMemberAdd, GlobalTeamMemberRead, ProfileReminderResult, SkillMemberRead, TeamCreate, TeamMemberRead, TeamRead, TeamUpdate, UserDirectoryRead, UserProfileRead, UserProfileUpdate
+from app.models import ChatConversation, ChatMessage, ChatNotification, ChatParticipant, ChatType, Comment, GlobalAnnouncement, GlobalDepartment, GlobalDesignation, GlobalSkill, GlobalTeamMember, OrganizationHoliday, Project, Task, TaskAssignee, TaskStatus, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceRole
+from app.schemas import DepartmentCreate, DepartmentRead, DepartmentUpdate, DesignationCreate, DesignationRead, DesignationUpdate, GlobalAnnouncementSend, GlobalMemberAssign, GlobalSkillCreate, GlobalSkillRead, GlobalSkillUpdate, GlobalTeamMemberAdd, GlobalTeamMemberRead, HolidayCreate, HolidayRead, ProfileReminderResult, SkillMemberRead, TeamCreate, TeamMemberRead, TeamRead, TeamUpdate, UserDirectoryRead, UserProfileRead, UserProfileUpdate
 
 router = APIRouter(prefix="/admin", tags=["System administration"])
 
@@ -17,6 +17,29 @@ router = APIRouter(prefix="/admin", tags=["System administration"])
 def require_system_admin(current_user: CurrentUser) -> None:
     if not current_user.is_system_admin:
         raise HTTPException(status_code=403, detail="System administrator access required")
+
+
+@router.get("/holidays", response_model=list[HolidayRead])
+def list_holidays(db: DB, current_user: CurrentUser) -> list[OrganizationHoliday]:
+    require_system_admin(current_user)
+    return list(db.scalars(select(OrganizationHoliday).order_by(OrganizationHoliday.holiday_date)).all())
+
+
+@router.post("/holidays", response_model=HolidayRead, status_code=201)
+def create_holiday(payload: HolidayCreate, db: DB, current_user: CurrentUser) -> OrganizationHoliday:
+    require_system_admin(current_user)
+    if db.scalar(select(OrganizationHoliday.id).where(OrganizationHoliday.holiday_date == payload.holiday_date)):
+        raise HTTPException(status_code=409, detail="A holiday already exists on this date")
+    item = OrganizationHoliday(name=payload.name.strip(), holiday_date=payload.holiday_date, description=payload.description, is_active=True)
+    db.add(item); db.commit(); db.refresh(item); return item
+
+
+@router.delete("/holidays/{holiday_id}", status_code=204)
+def delete_holiday(holiday_id: int, db: DB, current_user: CurrentUser) -> None:
+    require_system_admin(current_user)
+    item = db.get(OrganizationHoliday, holiday_id)
+    if item is None: raise HTTPException(status_code=404, detail="Holiday not found")
+    db.delete(item); db.commit()
 
 
 def global_users(db: DB) -> list[User]:
@@ -29,9 +52,14 @@ def global_users(db: DB) -> list[User]:
 
 def global_directory_item(db: DB, user: User) -> UserDirectoryRead:
     project_names = list(db.scalars(select(Project.name).join(TeamMember, TeamMember.project_id == Project.id).where(TeamMember.user_id == user.id).distinct()).all())
+    project_names.extend(db.scalars(
+        select(Project.name).join(Task, Task.project_id == Project.id)
+        .join(TaskAssignee, TaskAssignee.task_id == Task.id)
+        .where(TaskAssignee.user_id == user.id).distinct()
+    ).all())
     percent, missing = profile_completion(user, user.profile)
     role = WorkspaceRole.admin if user.is_system_admin else WorkspaceRole.member if user.is_member else None
-    return UserDirectoryRead(user_id=user.id, name=user.name, email=user.email, is_active=user.is_active, is_member=user.is_member, is_system_admin=user.is_system_admin, role=role, professional_title=user.profile.professional_title if user.profile else None, department=user.profile.department if user.profile else None, profile_image=user.profile.profile_image if user.profile else None, projects=sorted(project_names), completion_percent=percent, missing_fields=missing)
+    return UserDirectoryRead(user_id=user.id, name=user.name, email=user.email, is_active=user.is_active, is_member=user.is_member, is_system_admin=user.is_system_admin, role=role, professional_title=user.profile.professional_title if user.profile else None, department=user.profile.department if user.profile else None, profile_image=user.profile.profile_image if user.profile else None, projects=sorted(set(project_names)), completion_percent=percent, missing_fields=missing)
 
 
 @router.get("/users", response_model=list[UserDirectoryRead])
@@ -42,8 +70,16 @@ def list_global_users(db: DB, current_user: CurrentUser) -> list[UserDirectoryRe
         .join(Project, Project.id == TeamMember.project_id)
         .distinct()
     ).all()
+    task_assignment_rows = db.execute(
+        select(TaskAssignee.user_id, Project.name)
+        .join(Task, Task.id == TaskAssignee.task_id)
+        .join(Project, Project.id == Task.project_id)
+        .distinct()
+    ).all()
     projects: dict[int, list[str]] = {}
     for user_id, project_name in allocation_rows:
+        projects.setdefault(user_id, []).append(project_name)
+    for user_id, project_name in task_assignment_rows:
         projects.setdefault(user_id, []).append(project_name)
     result: list[UserDirectoryRead] = []
     for user in global_users(db):
@@ -210,6 +246,82 @@ def delete_global_user(user_id: int, db: DB, current_user: CurrentUser) -> None:
     db.delete(user); db.commit()
 
 
+def global_skill_usage(db: DB) -> dict[str, int]:
+    usage: dict[str, int] = {}
+    for value in db.scalars(select(UserProfile.skills)).all():
+        for name in parse_skills(value):
+            usage[name.casefold()] = usage.get(name.casefold(), 0) + 1
+    return usage
+
+
+def global_skill_response(item: GlobalSkill, usage: dict[str, int]) -> GlobalSkillRead:
+    return GlobalSkillRead.model_validate({
+        "id": item.id, "name": item.name, "description": item.description,
+        "usage_count": usage.get(item.name.casefold(), 0),
+        "created_at": item.created_at, "updated_at": item.updated_at,
+    })
+
+
+@router.get("/skill-catalog-items", response_model=list[GlobalSkillRead])
+def list_global_skill_catalog(db: DB, current_user: CurrentUser) -> list[GlobalSkillRead]:
+    require_system_admin(current_user)
+    existing = {item.name.casefold(): item for item in db.scalars(select(GlobalSkill)).all()}
+    usage = global_skill_usage(db)
+    for value in db.scalars(select(UserProfile.skills)).all():
+        for name in parse_skills(value):
+            if name.casefold() not in existing:
+                item = GlobalSkill(name=name)
+                db.add(item); existing[name.casefold()] = item
+    db.commit()
+    items = list(db.scalars(select(GlobalSkill).order_by(func.lower(GlobalSkill.name))).all())
+    return [global_skill_response(item, usage) for item in items]
+
+
+@router.post("/skill-catalog-items", response_model=GlobalSkillRead, status_code=201)
+def create_global_skill(payload: GlobalSkillCreate, db: DB, current_user: CurrentUser) -> GlobalSkillRead:
+    require_system_admin(current_user)
+    name = " ".join(payload.name.split())
+    if db.scalar(select(GlobalSkill.id).where(func.lower(GlobalSkill.name) == name.casefold())):
+        raise HTTPException(status_code=409, detail="A skill with this name already exists")
+    item = GlobalSkill(name=name, description=payload.description.strip() if payload.description else None)
+    db.add(item); db.commit(); db.refresh(item)
+    return global_skill_response(item, global_skill_usage(db))
+
+
+@router.patch("/skill-catalog-items/{skill_id}", response_model=GlobalSkillRead)
+def update_global_skill(skill_id: int, payload: GlobalSkillUpdate, db: DB, current_user: CurrentUser) -> GlobalSkillRead:
+    require_system_admin(current_user)
+    item = db.get(GlobalSkill, skill_id)
+    if item is None: raise HTTPException(status_code=404, detail="Skill not found")
+    name = " ".join(payload.name.split())
+    duplicate = db.scalar(select(GlobalSkill.id).where(func.lower(GlobalSkill.name) == name.casefold(), GlobalSkill.id != skill_id))
+    if duplicate: raise HTTPException(status_code=409, detail="A skill with this name already exists")
+    old_key = item.name.casefold()
+    for profile in db.scalars(select(UserProfile).where(UserProfile.skills.is_not(None))).all():
+        values = parse_skills(profile.skills)
+        if any(value.casefold() == old_key for value in values):
+            replaced = [name if value.casefold() == old_key else value for value in values]
+            profile.skills = ", ".join(parse_skills(", ".join(replaced)))
+    item.name = name; item.description = payload.description.strip() if payload.description else None
+    db.commit(); db.refresh(item)
+    return global_skill_response(item, global_skill_usage(db))
+
+
+@router.delete("/skill-catalog-items/{skill_id}")
+def delete_global_skill(skill_id: int, db: DB, current_user: CurrentUser) -> dict:
+    require_system_admin(current_user)
+    item = db.get(GlobalSkill, skill_id)
+    if item is None: raise HTTPException(status_code=404, detail="Skill not found")
+    key = item.name.casefold(); affected = 0
+    for profile in db.scalars(select(UserProfile).where(UserProfile.skills.is_not(None))).all():
+        values = parse_skills(profile.skills)
+        remaining = [value for value in values if value.casefold() != key]
+        if len(remaining) != len(values):
+            affected += 1; profile.skills = ", ".join(remaining) or None
+    db.delete(item); db.commit()
+    return {"deleted": True, "affected_profiles": affected}
+
+
 @router.get("/skills", response_model=list[SkillMemberRead])
 def list_global_skills(db: DB, current_user: CurrentUser) -> list[SkillMemberRead]:
     require_system_admin(current_user)
@@ -219,14 +331,48 @@ def list_global_skills(db: DB, current_user: CurrentUser) -> list[SkillMemberRea
     project_ids: dict[int, list[int]] = {}
     for user_id, project_id in project_rows:
         project_ids.setdefault(user_id, []).append(project_id)
-    return [SkillMemberRead(
-        user_id=user.id, name=user.name, email=user.email,
-        professional_title=user.profile.professional_title if user.profile else None,
-        department=user.profile.department if user.profile else None,
-        profile_image=user.profile.profile_image if user.profile else None,
-        skills=parse_skills(user.profile.skills if user.profile else None),
-        project_ids=project_ids.get(user.id, []),
-    ) for user in global_users(db)]
+    memberships = {item.user_id: item for item in db.scalars(
+        select(GlobalTeamMember).options(selectinload(GlobalTeamMember.team))
+    ).all()}
+    active_counts = dict(db.execute(
+        select(TaskAssignee.user_id, func.count(TaskAssignee.id)).join(Task)
+        .where(Task.status != TaskStatus.done).group_by(TaskAssignee.user_id)
+    ).all())
+    hourly_rates = {item.name: item.hourly_rate for item in db.scalars(select(GlobalDesignation)).all()}
+    users = [user for user in global_users(db) if user.is_active and (user.is_member or user.is_system_admin)]
+    result = []
+    for user in users:
+        completion, _ = profile_completion(user, user.profile)
+        membership = memberships.get(user.id)
+        department = user.profile.department if user.profile else None
+        designation = user.profile.professional_title if user.profile else None
+        reason = None
+        if completion < 50: reason = f"Profile is only {completion}% complete"
+        elif not department: reason = "Department is not assigned"
+        elif not designation: reason = "Designation is not assigned"
+        elif membership is None: reason = "Member is not allocated to a team"
+        result.append(SkillMemberRead(
+            user_id=user.id, name=user.name, email=user.email,
+            professional_title=designation, department=department,
+            profile_image=user.profile.profile_image if user.profile else None,
+            skills=parse_skills(user.profile.skills if user.profile else None),
+            project_ids=project_ids.get(user.id, []), team_id=membership.team_id if membership else None,
+            team_name=membership.team.name if membership else None, completion_percent=completion,
+            total_active_tasks=active_counts.get(user.id, 0), hourly_rate=hourly_rates.get(designation, 0),
+            is_eligible=reason is None, eligibility_reason=reason,
+        ))
+    return result
+
+
+@router.get("/skill-projects")
+def list_skill_assignment_projects(db: DB, current_user: CurrentUser) -> list[dict]:
+    require_system_admin(current_user)
+    rows = db.execute(
+        select(Project.id, Project.name, Workspace.name)
+        .join(Workspace, Workspace.id == Project.workspace_id)
+        .order_by(Workspace.name, Project.name)
+    ).all()
+    return [{"id": project_id, "name": project_name, "workspace_name": workspace_name} for project_id, project_name, workspace_name in rows]
 
 
 @router.get("/departments", response_model=list[DepartmentRead])
@@ -280,7 +426,7 @@ def list_global_designations(db: DB, current_user: CurrentUser) -> list[Designat
 def create_global_designation(payload: DesignationCreate, db: DB, current_user: CurrentUser) -> DesignationRead:
     require_system_admin(current_user)
     if db.get(GlobalDepartment, payload.department_id) is None: raise HTTPException(status_code=400, detail="Select a valid department")
-    item = GlobalDesignation(name=payload.name.strip(), description=payload.description, department_id=payload.department_id)
+    item = GlobalDesignation(name=payload.name.strip(), description=payload.description, department_id=payload.department_id, hourly_rate=payload.hourly_rate)
     db.add(item); db.commit(); db.refresh(item)
     return designation_response(item)
 
@@ -324,6 +470,30 @@ def global_team_manager(db: DB, user_id: int) -> tuple[User, str]:
     return user, designation
 
 
+def ensure_single_team_affiliation(db: DB, user_id: int, team_id: int | None = None) -> None:
+    """A manager or regular member may be affiliated with one global team only."""
+    membership = db.scalar(
+        select(GlobalTeamMember)
+        .options(selectinload(GlobalTeamMember.team))
+        .where(GlobalTeamMember.user_id == user_id)
+    )
+    if membership and membership.team_id != team_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This person already belongs to {membership.team.name}. Remove them from that team first.",
+        )
+    management = db.scalar(
+        select(TeamManager)
+        .options(selectinload(TeamManager.team))
+        .where(TeamManager.user_id == user_id)
+    )
+    if management and management.team_id != team_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This person already manages {management.team.name}. Assign another manager to that team first.",
+        )
+
+
 @router.get("/teams", response_model=list[TeamRead])
 def list_global_teams(db: DB, current_user: CurrentUser) -> list[Team]:
     require_system_admin(current_user)
@@ -333,9 +503,13 @@ def list_global_teams(db: DB, current_user: CurrentUser) -> list[Team]:
 @router.post("/teams", response_model=TeamRead, status_code=201)
 def create_global_team(payload: TeamCreate, db: DB, current_user: CurrentUser) -> Team:
     require_system_admin(current_user); _, manager_designation = global_team_manager(db, payload.manager_user_id)
+    ensure_single_team_affiliation(db, payload.manager_user_id)
     team = Team(name=payload.name.strip(), description=payload.description, workspace_id=None)
     team.manager_record = TeamManager(user_id=payload.manager_user_id, designation=manager_designation)
-    db.add(team); db.commit(); db.refresh(team)
+    db.add(team); db.flush()
+    db.add(GlobalTeamMember(team_id=team.id, user_id=payload.manager_user_id, designation=manager_designation))
+    sync_scoped_conversation_access(db, payload.manager_user_id, active=True, team_id=team.id, global_team=True)
+    db.commit(); db.refresh(team)
     return team
 
 
@@ -347,10 +521,13 @@ def update_global_team(team_id: int, payload: TeamUpdate, db: DB, current_user: 
     values = payload.model_dump(exclude_unset=True); manager_user_id = values.pop("manager_user_id", team.manager_user_id); values.pop("manager_designation", None)
     if manager_user_id is None: raise HTTPException(status_code=400, detail="Every team requires a designated manager")
     _, designation = global_team_manager(db, manager_user_id)
+    ensure_single_team_affiliation(db, manager_user_id, team.id)
     previous_manager_id = team.manager_user_id
     if team.manager_record is None: team.manager_record = TeamManager()
     team.manager_record.user_id = manager_user_id; team.manager_record.designation = designation.strip()
     if previous_manager_id != manager_user_id:
+        if not db.scalar(select(GlobalTeamMember.id).where(GlobalTeamMember.team_id == team.id, GlobalTeamMember.user_id == manager_user_id)):
+            db.add(GlobalTeamMember(team_id=team.id, user_id=manager_user_id, designation=designation.strip()))
         sync_scoped_conversation_access(db, manager_user_id, active=True, team_id=team.id, global_team=True)
         if previous_manager_id and not db.scalar(select(GlobalTeamMember.id).where(GlobalTeamMember.team_id == team.id, GlobalTeamMember.user_id == previous_manager_id)):
             sync_scoped_conversation_access(db, previous_manager_id, active=False, team_id=team.id, global_team=True)
@@ -405,8 +582,19 @@ def add_global_team_member(team_id: int, payload: GlobalTeamMemberAdd, db: DB, c
         raise HTTPException(status_code=400, detail="Assign the member's department and designation first")
     valid = db.scalar(select(GlobalDesignation.id).join(GlobalDepartment).where(GlobalDesignation.name == user.profile.professional_title, GlobalDepartment.name == user.profile.department))
     if valid is None: raise HTTPException(status_code=400, detail="Assign a valid department and designation first")
-    if db.scalar(select(GlobalTeamMember.id).where(GlobalTeamMember.team_id == team_id, GlobalTeamMember.user_id == user.id)):
-        raise HTTPException(status_code=409, detail="Member is already in this team")
+    ensure_single_team_affiliation(db, user.id, team_id)
+    existing_membership = db.scalar(
+        select(GlobalTeamMember)
+        .options(selectinload(GlobalTeamMember.team))
+        .where(GlobalTeamMember.user_id == user.id)
+    )
+    if existing_membership:
+        if existing_membership.team_id == team_id:
+            raise HTTPException(status_code=409, detail="Member is already in this team")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Member already belongs to {existing_membership.team.name}. Remove them from that team before assigning another team.",
+        )
     membership = GlobalTeamMember(team_id=team_id, user_id=user.id, designation=user.profile.professional_title)
     db.add(membership); sync_scoped_conversation_access(db, user.id, active=True, team_id=team_id, global_team=True); db.commit(); db.refresh(membership)
     return db.scalar(select(GlobalTeamMember).options(selectinload(GlobalTeamMember.user).selectinload(User.profile)).where(GlobalTeamMember.id == membership.id))

@@ -10,7 +10,7 @@ from app.dependencies import (
     require_workspace_admin,
     require_workspace_member,
 )
-from app.models import Project, ProjectBoard, Sprint, Task, TaskStatus, TeamMember, User, WorkspaceMember, WorkspaceRole
+from app.models import Project, ProjectBoard, Sprint, Task, TaskAssignee, TaskStatus, TeamMember, User, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     ProjectCreate,
     ProjectRead,
@@ -51,7 +51,11 @@ def accessible_project(db: DB, project_id: int, user_id: int) -> Project:
             TeamMember.project_id == project.id,
             TeamMember.user_id == user_id,
         ))
-        if allocation is None:
+        task_assignment = db.scalar(select(TaskAssignee.id).join(Task).where(
+            Task.project_id == project.id,
+            TaskAssignee.user_id == user_id,
+        ))
+        if allocation is None and task_assignment is None:
             raise HTTPException(status_code=404, detail="Project not found")
     return project
 
@@ -103,9 +107,13 @@ def list_projects(
         allocated_project_ids = select(TeamMember.project_id).where(
             TeamMember.user_id == current_user.id
         )
+        task_project_ids = select(Task.project_id).join(TaskAssignee).where(
+            TaskAssignee.user_id == current_user.id
+        )
         query = query.where(
             (Project.project_manager_id == current_user.id) |
-            Project.id.in_(allocated_project_ids)
+            Project.id.in_(allocated_project_ids) |
+            Project.id.in_(task_project_ids)
         )
     return list(db.scalars(query.order_by(Project.created_at.desc())).all())
 
@@ -121,6 +129,9 @@ def project_report(project_id: int, db: DB, current_user: CurrentUser) -> dict:
     project = accessible_project(db, project_id, current_user.id)
     tasks = list(db.scalars(select(Task).where(Task.project_id == project.id)).all())
     allocations = list(db.scalars(select(TeamMember).where(TeamMember.project_id == project.id)).all())
+    task_assignee_ids = set(db.scalars(
+        select(TaskAssignee.user_id).join(Task).where(Task.project_id == project.id)
+    ).all())
     today = date.today()
     total = len(tasks)
     completed = sum(task.status == TaskStatus.done for task in tasks)
@@ -131,6 +142,9 @@ def project_report(project_id: int, db: DB, current_user: CurrentUser) -> dict:
     priority_counts = {priority: sum(task.priority.value == priority for task in tasks) for priority in ("low", "medium", "high", "critical")}
     total_points = sum(task.story_points or 0 for task in tasks)
     completed_points = sum(task.story_points or 0 for task in tasks if task.status == TaskStatus.done)
+    task_planned_cost = sum(task.planned_budget or 0 for task in tasks)
+    actual_cost = sum(task.actual_cost or 0 for task in tasks)
+    costed_tasks = sum(task.actual_cost is not None for task in tasks)
 
     # There are no task-dependency fields in the current data model. This is a
     # transparent schedule-risk path: unfinished high-priority tasks, ordered by
@@ -139,7 +153,7 @@ def project_report(project_id: int, db: DB, current_user: CurrentUser) -> dict:
         (task for task in scheduled if task.status != TaskStatus.done and task.priority.value in {"high", "critical"}),
         key=lambda task: (task.due_date, task.start_date),
     )[:8]
-    team_members = sorted({allocation.user_id for allocation in allocations})
+    team_members = sorted({allocation.user_id for allocation in allocations} | task_assignee_ids)
     planned_days = max(1, (project.end_date - project.start_date).days + 1)
     elapsed_days = min(planned_days, max(0, (today - project.start_date).days + 1))
     schedule_percent = round(elapsed_days * 100 / planned_days)
@@ -154,7 +168,7 @@ def project_report(project_id: int, db: DB, current_user: CurrentUser) -> dict:
         "progress": progress,
         "schedule_percent": schedule_percent,
         "tasks": {"total": total, "completed": completed, "overdue": len(overdue), "scheduled": len(scheduled), "status_counts": status_counts, "priority_counts": priority_counts},
-        "budget": {"planned": project.budget, "cost_tracking_available": False, "story_points": total_points, "completed_story_points": completed_points},
+        "budget": {"planned": project.budget, "task_planned": task_planned_cost, "actual": actual_cost, "variance": (project.budget - actual_cost) if project.budget is not None and costed_tasks else None, "costed_tasks": costed_tasks, "cost_tracking_available": bool(costed_tasks), "story_points": total_points, "completed_story_points": completed_points},
         "team": {"allocated_members": len(team_members), "allocations": len(allocations)},
         "critical_path": [{"id": task.id, "title": task.title, "priority": task.priority.value, "status": task.status.value, "start_date": task.start_date, "due_date": task.due_date, "progress": task.progress} for task in critical_path],
         "workflow": status_counts,

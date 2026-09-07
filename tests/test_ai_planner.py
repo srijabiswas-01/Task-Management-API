@@ -46,12 +46,6 @@ def test_ai_plan_preview_and_confirmation_create_board_tasks(
         json={"name": "Delivery", "manager_user_id": current_user["id"], "manager_designation": "Delivery Lead"},
         headers=auth_headers,
     ).json()
-    client.post(
-        f"/workspaces/{workspace_id}/teams/{team['id']}/members",
-        json={"user_id": current_user["id"], "project_id": project_id, "designation": "Delivery Lead"},
-        headers=auth_headers,
-    )
-
     generated = AIGeneratedPlan(
         summary="A practical mobile delivery plan",
         tasks=[
@@ -86,7 +80,7 @@ def test_ai_plan_preview_and_confirmation_create_board_tasks(
         json={
                 "prompt": "Build a secure mobile application for customers",
                 "maximum_tasks": 10,
-                "team_id": team["id"],
+                "team_ids": [team["id"]],
         },
         headers=auth_headers,
     )
@@ -95,6 +89,19 @@ def test_ai_plan_preview_and_confirmation_create_board_tasks(
     assert preview.json()["fallback_used"] is True
     assert preview.json()["tasks"][0]["start_date"] == "2026-08-01"
     assert preview.json()["tasks"][1]["end_date"] == "2026-12-31"
+    assert all(task["assignee_ids"] == [] for task in preview.json()["tasks"])
+
+    unassigned_preview = client.post(
+        f"/projects/{project_id}/ai/task-plan",
+        json={
+            "prompt": "Build the same secure mobile application without assigning a delivery team",
+            "maximum_tasks": 10,
+            "team_ids": [],
+        },
+        headers=auth_headers,
+    )
+    assert unassigned_preview.status_code == 200
+    assert all(task["assignee_ids"] == [] for task in unassigned_preview.json()["tasks"])
 
     confirmed = client.post(
         f"/projects/{project_id}/ai/task-plan/confirm",

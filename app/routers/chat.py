@@ -512,6 +512,16 @@ def list_global_conversations(db: DB, current_user: CurrentUser) -> list[ChatCon
     return [conversation_summary_read(db, item, current_user.id, has_current_global_access(db, item, current_user) and (item.scope_type != "global" or current_user.is_system_admin), current_user.is_system_admin or (item.scope_type == "team" and bool(db.scalar(select(TeamManager.id).where(TeamManager.team_id == item.team_id, TeamManager.user_id == current_user.id))))) for item in visible]
 
 
+@global_router.get("/unread-count")
+def unread_chat_count(db: DB, current_user: CurrentUser) -> dict[str, int]:
+    """Lightweight badge check that avoids loading conversation rows and users."""
+    count = db.scalar(select(func.count(ChatNotification.id)).where(
+        ChatNotification.user_id == current_user.id,
+        ChatNotification.is_read.is_(False),
+    )) or 0
+    return {"unread_count": count}
+
+
 @global_router.get("/options", response_model=ChatOptionsRead)
 def global_chat_options(db: DB, current_user: CurrentUser) -> ChatOptionsRead:
     if current_user.is_system_admin:

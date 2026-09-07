@@ -42,6 +42,37 @@ def test_register_login_and_me(client: TestClient):
     assert client.get("/admin/skills", headers=admin_headers).status_code == 200
 
 
+def test_global_skill_catalog_rename_and_delete_sync_profiles(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    profile = client.put(
+        "/auth/profile", headers=auth_headers,
+        json={"name": "Test User", "skills": "Python, React"}
+    )
+    assert profile.status_code == 200
+    catalog = client.get("/admin/skill-catalog-items", headers=auth_headers)
+    assert catalog.status_code == 200
+    react = next(item for item in catalog.json() if item["name"] == "React")
+    assert react["usage_count"] == 1
+
+    renamed = client.patch(
+        f"/admin/skill-catalog-items/{react['id']}", headers=auth_headers,
+        json={"name": "React.js", "description": "Frontend library"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["usage_count"] == 1
+    assert "React.js" in client.get("/auth/profile", headers=auth_headers).json()["skills"]
+
+    deleted = client.delete(
+        f"/admin/skill-catalog-items/{react['id']}", headers=auth_headers
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["affected_profiles"] == 1
+    skills = client.get("/auth/profile", headers=auth_headers).json()["skills"]
+    assert "React.js" not in skills
+    assert "Python" in skills
+
+
 def test_only_one_simultaneous_first_registration_becomes_admin(client: TestClient):
     def register(index: int):
         return client.post(
@@ -541,36 +572,44 @@ def test_task_completion_moves_card_to_done_and_can_reopen(
         )
         assert created_item.status_code == 201
 
-    completed = client.patch(
+    blocked = client.patch(
         f"/tasks/{task_id}/completion",
         json={"is_completed": True},
         headers=auth_headers,
     )
-    assert completed.status_code == 200
-    assert completed.json()["status"] == "done"
-    assert completed.json()["progress"] == 100
-    completed_items = client.get(
+    assert blocked.status_code == 409
+    assert "Complete all checklist items" in blocked.json()["detail"]
+    items = client.get(
         f"/tasks/{task_id}/checklist", headers=auth_headers
     ).json()
-    assert all(item["is_done"] for item in completed_items)
-    assert all(item["last_action"] == "completed" for item in completed_items)
+    first = client.patch(
+        f"/tasks/{task_id}/checklist/{items[0]['id']}",
+        json={"is_done": True}, headers=auth_headers,
+    )
+    assert first.status_code == 200
+    halfway = client.get(f"/tasks/{task_id}", headers=auth_headers).json()
+    assert halfway["progress"] == 50
+    assert halfway["status"] == "backlog"
+    second = client.patch(
+        f"/tasks/{task_id}/checklist/{items[1]['id']}",
+        json={"is_done": True}, headers=auth_headers,
+    )
+    assert second.status_code == 200
+    completed = client.get(f"/tasks/{task_id}", headers=auth_headers).json()
+    assert completed["status"] == "done"
+    assert completed["progress"] == 100
     board = client.get(f"/projects/{project_id}/board", headers=auth_headers).json()
     done_column = next(column for column in board["columns"] if column["system_status"] == "done")
     assert board["task_positions"][str(task_id)]["column_id"] == done_column["id"]
 
     reopened = client.patch(
-        f"/tasks/{task_id}/completion",
-        json={"is_completed": False},
-        headers=auth_headers,
+        f"/tasks/{task_id}/checklist/{items[1]['id']}",
+        json={"is_done": False}, headers=auth_headers,
     )
     assert reopened.status_code == 200
-    assert reopened.json()["status"] == "backlog"
-    assert reopened.json()["progress"] == 0
-    reopened_items = client.get(
-        f"/tasks/{task_id}/checklist", headers=auth_headers
-    ).json()
-    assert all(not item["is_done"] for item in reopened_items)
-    assert all(item["last_action"] == "reopened" for item in reopened_items)
+    reopened_task = client.get(f"/tasks/{task_id}", headers=auth_headers).json()
+    assert reopened_task["status"] == "backlog"
+    assert reopened_task["progress"] == 50
     board = client.get(f"/projects/{project_id}/board", headers=auth_headers).json()
     first_column = min(board["columns"], key=lambda column: column["position"])
     assert board["task_positions"][str(task_id)]["column_id"] == first_column["id"]
@@ -1024,6 +1063,15 @@ def test_task_collaboration_schedule_checklist_and_status_sync(
         == 100
     )
 
+    # A fully completed checklist keeps the task in Done. Reopen an item
+    # before moving the task back into active work.
+    reopened_item = client.patch(
+        f"/tasks/{task_id}/checklist/{item['id']}",
+        json={"is_done": False},
+        headers=auth_headers,
+    )
+    assert reopened_item.status_code == 200
+
     client.patch(
         f"/tasks/{task_id}",
         json={"status": "in_progress"},
@@ -1249,6 +1297,23 @@ def test_team_allocation_controls_member_collaboration_access(
     )
     assert comment.status_code == 201
     assert comment.json()["author_id"] == teammate["id"]
+    member_comment_id = comment.json()["id"]
+    assert client.delete(
+        f"/tasks/{visible_task['id']}/comments/{member_comment_id}",
+        headers=member_headers,
+    ).status_code == 204
+    admin_deleted_comment = client.post(
+        f"/tasks/{visible_task['id']}/comments",
+        json={"body": "Member comment deleted by Admin"},
+        headers=member_headers,
+    ).json()
+    assert client.delete(
+        f"/tasks/{visible_task['id']}/comments/{admin_deleted_comment['id']}",
+        headers=auth_headers,
+    ).status_code == 204
+    assert client.get(
+        f"/tasks/{visible_task['id']}/comments", headers=auth_headers
+    ).json() == []
     completed = client.patch(
         f"/tasks/{visible_task['id']}/checklist/{checklist_item['id']}",
         json={"is_done": True},
@@ -1629,3 +1694,129 @@ def test_global_reminders_and_announcements_work_without_workspace(
     assert client.patch(
         f"/notifications/{global_announcement['id']}/read", headers=member_headers
     ).status_code == 200
+
+
+def test_manual_task_planning_uses_global_teams_holidays_workload_and_hourly_rates(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    admin = client.get("/auth/me", headers=auth_headers).json()
+    department = client.post(
+        "/admin/departments", json={"name": "Delivery"}, headers=auth_headers
+    ).json()
+    designation = client.post(
+        "/admin/designations",
+        json={"name": "Delivery Engineer", "department_id": department["id"], "hourly_rate": 100},
+        headers=auth_headers,
+    )
+    assert designation.status_code == 201
+    assert designation.json()["hourly_rate"] == 100
+    assert client.patch(
+        f"/admin/users/{admin['id']}/member",
+        json={"role": "admin", "department": "Delivery", "professional_title": "Delivery Engineer"},
+        headers=auth_headers,
+    ).status_code == 200
+    profile = client.put(
+        f"/admin/users/{admin['id']}/profile",
+        json={
+            "name": admin["name"], "profile_image": valid_profile_image(),
+            "phone": "9999999999", "location_city": "Kolkata",
+            "location_state": "West Bengal", "location_country": "India",
+            "department": "Delivery", "professional_title": "Delivery Engineer",
+            "experience_start_date": "2021-01-01", "skills": "Python, Planning",
+        },
+        headers=auth_headers,
+    )
+    assert profile.status_code == 200
+    assert profile.json()["completion_percent"] >= 50
+
+    team = client.post(
+        "/admin/teams",
+        json={"name": "Independent Delivery Team", "manager_user_id": admin["id"]},
+        headers=auth_headers,
+    ).json()
+    memberships = client.get("/admin/global-team-members", headers=auth_headers).json()
+    assert [(item["team_id"], item["user_id"]) for item in memberships] == [(team["id"], admin["id"])]
+    second_team = client.post(
+        "/admin/teams",
+        json={"name": "Second Delivery Team", "manager_user_id": admin["id"]},
+        headers=auth_headers,
+    )
+    assert second_team.status_code == 409
+    assert "already belongs to Independent Delivery Team" in second_team.json()["detail"]
+    holiday = client.post(
+        "/admin/holidays",
+        json={"name": "Planning holiday", "holiday_date": "2026-09-09"},
+        headers=auth_headers,
+    )
+    assert holiday.status_code == 201
+
+    workspace = client.post(
+        "/workspaces", json={"name": "Task planning workspace"}, headers=auth_headers
+    ).json()
+    project = client.post(
+        f"/workspaces/{workspace['id']}/projects",
+        json={
+            "name": "Independent assignment project", "start_date": "2026-09-01",
+            "end_date": "2026-09-30", "project_manager_id": admin["id"],
+        },
+        headers=auth_headers,
+    )
+    assert project.status_code == 201
+    project = project.json()
+
+    options = client.get(
+        f"/projects/{project['id']}/task-planning-options", headers=auth_headers
+    )
+    assert options.status_code == 200
+    options = options.json()
+    assert options["working_hours_per_day"] == 8
+    assert options["teams"] == [{"id": team["id"], "name": "Independent Delivery Team"}]
+    candidate = next(item for item in options["members"] if item["user_id"] == admin["id"])
+    assert candidate["designation"] == "Delivery Engineer"
+    assert candidate["hourly_rate"] == 100
+    assert candidate["total_active_tasks"] == 0
+
+    outside_project = client.post(
+        f"/projects/{project['id']}/tasks",
+        json={
+            "title": "Outside project schedule", "start_date": "2026-08-31",
+            "due_date": "2026-09-02",
+        },
+        headers=auth_headers,
+    )
+    assert outside_project.status_code == 400
+    assert outside_project.json()["detail"] == "Task dates must be within the project dates"
+
+    created = client.post(
+        f"/projects/{project['id']}/tasks",
+        json={
+            "title": "Prepare delivery plan", "description": "Create and review the plan",
+            "priority": "high", "status": "backlog", "start_date": "2026-09-07",
+            "due_date": "2026-09-13", "checklist": ["Draft plan", "Review plan"],
+            "assignments": [{
+                "user_id": admin["id"], "team_id": team["id"],
+                "responsibility": "Own planning", "planned_hours": 20,
+            }],
+        },
+        headers=auth_headers,
+    )
+    assert created.status_code == 201, created.text
+    task = created.json()
+    # Monday-Saturday are working days; Wednesday is a holiday and Sunday is excluded.
+    assert task["estimated_days"] == 5
+    assert task["estimated_hours"] == 40
+    assert task["planned_budget"] == 2000
+    assert task["assignments"] == [{
+        "user_id": admin["id"], "team_id": team["id"],
+        "responsibility": "Own planning", "planned_hours": 20,
+    }]
+    checklist = client.get(f"/tasks/{task['id']}/checklist", headers=auth_headers)
+    assert checklist.status_code == 200
+    assert [item["text"] for item in checklist.json()] == ["Draft plan", "Review plan"]
+
+    refreshed = client.get(
+        f"/projects/{project['id']}/task-planning-options", headers=auth_headers
+    ).json()
+    refreshed_candidate = next(item for item in refreshed["members"] if item["user_id"] == admin["id"])
+    assert refreshed_candidate["current_project_tasks"] == 1
+    assert refreshed_candidate["total_active_tasks"] == 1

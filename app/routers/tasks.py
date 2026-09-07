@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
@@ -18,10 +18,17 @@ from app.models import (
     TaskBoardPosition,
     TaskSchedule,
     TaskStatus,
+    GlobalDesignation,
+    GlobalTeamMember,
+    OrganizationHoliday,
     TeamMember,
+    Team,
+    User,
     WorkspaceMember,
     WorkspaceRole,
 )
+from app.core.profile import profile_completion
+from app.core.skills import parse_skills
 from app.routers.projects import accessible_project
 from app.schemas import (
     ChecklistItemCreate,
@@ -30,10 +37,12 @@ from app.schemas import (
     CommentCreate,
     CommentRead,
     DashboardSummary,
+    ProjectRead,
     TaskCreate,
     TaskCompletionUpdate,
     TaskRead,
     TaskUpdate,
+    WorkspaceOverviewRead,
 )
 
 router = APIRouter(tags=["Tasks"])
@@ -70,6 +79,122 @@ def set_task_assignees(
         if user_id not in existing_ids
     )
     task.assignee_id = unique_ids[0] if unique_ids else None
+
+
+def set_task_assignments(db: DB, task: Task, project: Project, assignments: list[dict]) -> None:
+    user_ids = [item["user_id"] for item in assignments]
+    if len(user_ids) != len(set(user_ids)):
+        raise HTTPException(status_code=400, detail="Each member can be assigned only once per task")
+    if assignments:
+        pairs = set(db.execute(select(GlobalTeamMember.user_id, GlobalTeamMember.team_id).where(
+            GlobalTeamMember.user_id.in_(user_ids)
+        )).all())
+        requested = {(item["user_id"], item["team_id"]) for item in assignments}
+        if not requested.issubset(pairs):
+            raise HTTPException(status_code=400, detail="Every assignee must belong to the selected team")
+        users = list(db.scalars(select(User).options(selectinload(User.profile)).where(
+            User.id.in_(user_ids), User.is_active.is_(True), User.is_member.is_(True)
+        )).all())
+        if len(users) != len(user_ids):
+            raise HTTPException(status_code=400, detail="Every assignee must be an active Member or Admin")
+        for user in users:
+            completion, _ = profile_completion(user, user.profile)
+            if completion < 50 or not user.profile or not user.profile.department or not user.profile.professional_title:
+                raise HTTPException(status_code=400, detail=f"{user.name} is not eligible for task assignment")
+            workspace_access = db.scalar(select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == project.workspace_id,
+                WorkspaceMember.user_id == user.id,
+            ))
+            if workspace_access is None:
+                db.add(WorkspaceMember(workspace_id=project.workspace_id, user_id=user.id, role=WorkspaceRole.member, is_active=True))
+    task.task_assignees[:] = []
+    task.task_assignees.extend(TaskAssignee(
+        user_id=item["user_id"], team_id=item["team_id"],
+        responsibility=(item.get("responsibility") or "").strip() or None,
+        planned_hours=item.get("planned_hours"),
+    ) for item in assignments)
+    task.assignee_id = user_ids[0] if user_ids else None
+
+
+def working_days(db: DB, start: date | None, end: date | None) -> int | None:
+    if not start or not end:
+        return None
+    holidays = set(db.scalars(select(OrganizationHoliday.holiday_date).where(
+        OrganizationHoliday.is_active.is_(True),
+        OrganizationHoliday.holiday_date >= start,
+        OrganizationHoliday.holiday_date <= end,
+    )).all())
+    days = 0
+    current = start
+    while current <= end:
+        if current.weekday() != 6 and current not in holidays:
+            days += 1
+        current += timedelta(days=1)
+    return days
+
+
+def estimated_assignment_budget(db: DB, assignments: list[dict], total_hours: int | None) -> int | None:
+    if not assignments or total_hours is None:
+        return None
+    users = {user.id: user for user in db.scalars(select(User).options(selectinload(User.profile)).where(
+        User.id.in_([item["user_id"] for item in assignments])
+    )).all()}
+    designations = {item.name: item.hourly_rate for item in db.scalars(select(GlobalDesignation)).all()}
+    default_hours = total_hours // len(assignments) if assignments else 0
+    return sum((item.get("planned_hours") if item.get("planned_hours") is not None else default_hours) *
+               designations.get(users[item["user_id"]].profile.professional_title, 0)
+               for item in assignments if item["user_id"] in users and users[item["user_id"]].profile)
+
+
+@router.get("/projects/{project_id}/task-planning-options")
+def task_planning_options(project_id: int, db: DB, current_user: CurrentUser) -> dict:
+    require_project_admin(db, project_id, current_user.id)
+    project = accessible_project(db, project_id, current_user.id)
+    teams = list(db.scalars(select(Team).where(
+        (Team.workspace_id.is_(None)) | (Team.workspace_id == project.workspace_id)
+    ).order_by(Team.name)).all())
+    global_memberships = list(db.scalars(select(GlobalTeamMember).options(
+        selectinload(GlobalTeamMember.user).selectinload(User.profile)
+    ).where(GlobalTeamMember.team_id.in_([team.id for team in teams])).order_by(GlobalTeamMember.team_id, GlobalTeamMember.user_id)).all())
+    legacy_memberships = list(db.scalars(select(TeamMember).options(
+        selectinload(TeamMember.user).selectinload(User.profile)
+    ).where(TeamMember.team_id.in_([team.id for team in teams])).order_by(TeamMember.team_id, TeamMember.user_id)).all())
+    active_statuses = [status for status in TaskStatus if status != TaskStatus.done]
+    hourly_rates = {item.name: item.hourly_rate for item in db.scalars(select(GlobalDesignation)).all()}
+    task_counts = {
+        (user_id, task_project_id): count
+        for user_id, task_project_id, count in db.execute(
+            select(TaskAssignee.user_id, Task.project_id, func.count(TaskAssignee.id))
+            .join(Task)
+            .where(Task.status.in_(active_statuses))
+            .group_by(TaskAssignee.user_id, Task.project_id)
+        ).all()
+    }
+    members = []
+    seen_memberships: set[tuple[int, int]] = set()
+    for membership in [*global_memberships, *legacy_memberships]:
+        user = membership.user
+        membership_key = (membership.team_id, user.id)
+        if membership_key in seen_memberships:
+            continue
+        seen_memberships.add(membership_key)
+        if not user.is_active or not user.is_member or not user.profile:
+            continue
+        completion, _ = profile_completion(user, user.profile)
+        current_count = task_counts.get((user.id, project.id), 0)
+        other_count = sum(
+            count for (user_id, task_project_id), count in task_counts.items()
+            if user_id == user.id and task_project_id != project.id
+        )
+        members.append({"user_id": user.id, "name": user.name, "profile_image": user.profile_image,
+            "team_id": membership.team_id, "department": user.profile.department,
+            "designation": user.profile.professional_title, "skills": parse_skills(user.profile.skills),
+            "hourly_rate": hourly_rates.get(user.profile.professional_title, 0),
+            "completion_percent": completion, "current_project_tasks": current_count,
+            "other_project_tasks": other_count, "total_active_tasks": current_count + other_count})
+    holidays = list(db.scalars(select(OrganizationHoliday).where(OrganizationHoliday.is_active.is_(True)).order_by(OrganizationHoliday.holiday_date)).all())
+    return {"working_hours_per_day": 8, "teams": [{"id": team.id, "name": team.name} for team in teams],
+        "members": members, "holidays": [{"date": str(item.holiday_date), "name": item.name} for item in holidays]}
 
 
 def set_task_schedule(task: Task, start_at, end_at) -> None:
@@ -184,10 +309,19 @@ def create_task(
     project = accessible_project(db, project_id, current_user.id)
     values = payload.model_dump()
     assignee_ids = values.pop("assignee_ids")
+    assignments = values.pop("assignments")
+    checklist = values.pop("checklist")
     legacy_assignee = values.pop("assignee_id")
     start_at = values.pop("start_at")
     end_at = values.pop("end_at")
     validate_task_project_dates(project, values.get("start_date"), values.get("due_date"), start_at, end_at)
+    calculated_days = working_days(db, values.get("start_date"), values.get("due_date"))
+    if calculated_days is not None:
+        values["estimated_days"] = calculated_days
+        if values.get("estimated_hours") is None:
+            values["estimated_hours"] = calculated_days * 8
+    if values.get("planned_budget") is None and assignments:
+        values["planned_budget"] = estimated_assignment_budget(db, assignments, values.get("estimated_hours"))
     if not assignee_ids and legacy_assignee is not None:
         assignee_ids = [legacy_assignee]
     task = Task(
@@ -195,9 +329,20 @@ def create_task(
         reporter_id=current_user.id,
         **values,
     )
-    set_task_assignees(db, task, project, assignee_ids)
+    if assignments:
+        set_task_assignments(db, task, project, assignments)
+    else:
+        set_task_assignees(db, task, project, assignee_ids)
     set_task_schedule(task, start_at, end_at)
     db.add(task)
+    db.flush()
+    for position, text_value in enumerate(dict.fromkeys(item.strip() for item in checklist if item.strip())):
+        item = ChecklistItem(task_id=task.id, text=text_value, position=position)
+        item.actions.append(ChecklistAction(user_id=current_user.id, action="created"))
+        db.add(item)
+    if checklist:
+        db.flush()
+        update_checklist_progress(db, task.id)
     db.commit()
     db.refresh(task)
     return task
@@ -241,6 +386,7 @@ def update_task(
     project = accessible_project(db, task.project_id, current_user.id)
     values = payload.model_dump(exclude_unset=True)
     assignee_ids = values.pop("assignee_ids", None)
+    assignments = values.pop("assignments", None)
     legacy_assignee = values.pop("assignee_id", None)
     has_schedule = "start_at" in values or "end_at" in values
     start_at = values.pop("start_at", task.start_at)
@@ -252,16 +398,32 @@ def update_task(
         start_at,
         end_at,
     )
-    if assignee_ids is not None:
+    calculated_days = working_days(db, values.get("start_date", task.start_date), values.get("due_date", task.due_date))
+    if calculated_days is not None:
+        values["estimated_days"] = calculated_days
+        if "estimated_hours" not in values:
+            values["estimated_hours"] = calculated_days * 8
+    if assignments is not None:
+        set_task_assignments(db, task, project, assignments)
+        if "planned_budget" not in values:
+            values["planned_budget"] = estimated_assignment_budget(db, assignments, values.get("estimated_hours", task.estimated_hours))
+    elif assignee_ids is not None:
         set_task_assignees(db, task, project, assignee_ids)
     elif legacy_assignee is not None:
         set_task_assignees(db, task, project, [legacy_assignee])
     if has_schedule:
         set_task_schedule(task, start_at, end_at)
-    if values.get("status") == TaskStatus.done and "progress" not in values:
+    if values.get("status") == TaskStatus.done:
+        checklist_items = list(db.scalars(select(ChecklistItem).where(ChecklistItem.task_id == task.id)).all())
+        if checklist_items and any(not item.is_done for item in checklist_items):
+            raise HTTPException(status_code=409, detail="Complete all checklist items before marking this task as done")
         values["progress"] = 100
     for field, value in values.items():
         setattr(task, field, value)
+    checklist_items = list(db.scalars(select(ChecklistItem).where(ChecklistItem.task_id == task.id)).all())
+    if checklist_items:
+        task.progress = round(sum(item.is_done for item in checklist_items) / len(checklist_items) * 100)
+        task.status = TaskStatus.done if task.progress == 100 else (TaskStatus.backlog if task.status == TaskStatus.done else task.status)
     if "status" in values:
         sync_board_column_to_status(db, task)
     db.commit()
@@ -281,7 +443,12 @@ def update_task_completion(
     checklist_items = list(
         db.scalars(select(ChecklistItem).where(ChecklistItem.task_id == task.id)).all()
     )
-    for item in checklist_items:
+    if payload.is_completed and checklist_items and any(not item.is_done for item in checklist_items):
+        raise HTTPException(
+            status_code=409,
+            detail="Complete all checklist items before marking this task as done",
+        )
+    for item in checklist_items if not payload.is_completed else []:
         if item.is_done == payload.is_completed:
             continue
         item.is_done = payload.is_completed
@@ -341,6 +508,25 @@ def list_comments(
     )
 
 
+@router.delete("/tasks/{task_id}/comments/{comment_id}", status_code=204)
+def delete_comment(
+    task_id: int, comment_id: int, db: DB, current_user: CurrentUser
+) -> None:
+    accessible_task(db, task_id, current_user.id)
+    comment = db.scalar(
+        select(Comment).where(Comment.id == comment_id, Comment.task_id == task_id)
+    )
+    if comment is None:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    if comment.author_id != current_user.id and not current_user.is_system_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the comment author or an Admin can delete this comment",
+        )
+    db.delete(comment)
+    db.commit()
+
+
 @router.get(
     "/tasks/{task_id}/checklist",
     response_model=list[ChecklistItemRead],
@@ -384,6 +570,8 @@ def create_checklist_item(
     )
     item.actions.append(ChecklistAction(user_id=current_user.id, action="created"))
     db.add(item)
+    db.flush()
+    update_checklist_progress(db, task_id)
     db.commit()
     db.refresh(item)
     return item
@@ -402,6 +590,12 @@ def update_checklist_progress(db: DB, task_id: int) -> None:
             if items
             else 0
         )
+        if items and all(item.is_done for item in items):
+            task.status = TaskStatus.done
+            move_task_to_board_edge(db, task, True)
+        elif task.status == TaskStatus.done:
+            task.status = TaskStatus.backlog
+            move_task_to_board_edge(db, task, False)
 
 
 @router.patch(
@@ -523,4 +717,49 @@ def dashboard(
         completed_tasks=completed,
         overdue_tasks=overdue,
         completion_percent=round((completed / tasks * 100) if tasks else 0, 2),
+    )
+
+
+@router.get(
+    "/workspaces/{workspace_id}/overview-data",
+    response_model=WorkspaceOverviewRead,
+)
+def workspace_overview_data(
+    workspace_id: int, db: DB, current_user: CurrentUser
+) -> WorkspaceOverviewRead:
+    """Return the small, commonly needed workspace landing-page payload."""
+    membership = require_workspace_member(db, workspace_id, current_user.id)
+    project_query = select(Project).where(Project.workspace_id == workspace_id)
+    if membership.role != WorkspaceRole.admin:
+        allocated_ids = select(TeamMember.project_id).where(
+            TeamMember.user_id == current_user.id
+        )
+        task_project_ids = select(Task.project_id).join(TaskAssignee).where(
+            TaskAssignee.user_id == current_user.id
+        )
+        project_query = project_query.where(
+            (Project.project_manager_id == current_user.id)
+            | Project.id.in_(allocated_ids)
+            | Project.id.in_(task_project_ids)
+        )
+    projects = list(db.scalars(project_query.order_by(Project.created_at.desc())).all())
+    project_ids = [project.id for project in projects]
+    active_projects = db.scalar(select(func.count(Project.id)).where(
+        Project.id.in_(project_ids), Project.status == ProjectStatus.active
+    )) or 0
+    task_count = db.scalar(select(func.count(Task.id)).where(Task.project_id.in_(project_ids))) or 0
+    completed = db.scalar(select(func.count(Task.id)).where(
+        Task.project_id.in_(project_ids), Task.status == TaskStatus.done
+    )) or 0
+    overdue = db.scalar(select(func.count(Task.id)).where(
+        Task.project_id.in_(project_ids), Task.due_date < date.today(),
+        Task.status != TaskStatus.done,
+    )) or 0
+    return WorkspaceOverviewRead(
+        projects=[ProjectRead.model_validate(project) for project in projects],
+        dashboard=DashboardSummary(
+            projects=len(projects), active_projects=active_projects, tasks=task_count,
+            completed_tasks=completed, overdue_tasks=overdue,
+            completion_percent=round((completed / task_count * 100) if task_count else 0, 2),
+        ),
     )

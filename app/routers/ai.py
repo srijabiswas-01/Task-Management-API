@@ -3,9 +3,9 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.dependencies import CurrentUser, DB, require_project_admin
-from app.models import ChecklistAction, ChecklistItem, Task, TaskAssignee, TaskStatus, Team, TeamMember
+from app.models import ChecklistAction, ChecklistItem, GlobalTeamMember, Task, TaskAssignee, TaskStatus, Team, TeamMember
 from app.routers.projects import accessible_project
-from app.routers.tasks import set_task_schedule, sync_board_column_to_status
+from app.routers.tasks import set_task_assignments, set_task_assignees, set_task_schedule, sync_board_column_to_status, working_days
 from app.schemas import (
     AITaskPlanConfirm,
     AITaskPlanRequest,
@@ -28,12 +28,25 @@ def plan_tasks(
     current_user: CurrentUser,
 ) -> AITaskPlanResponse:
     project = accessible_project(db, project_id, current_user.id)
-    team = db.get(Team, payload.team_id)
-    if team is None or team.workspace_id != project.workspace_id:
-        raise HTTPException(status_code=400, detail="Select a team in this workspace")
-    allocations = list(db.scalars(select(TeamMember).where(TeamMember.team_id == team.id, TeamMember.project_id == project.id)).all())
-    if not allocations:
-        raise HTTPException(status_code=400, detail="Allocate at least one team member to this project before AI planning")
+    selected_team_ids = list(dict.fromkeys(payload.team_ids + ([payload.team_id] if payload.team_id is not None else [])))
+    candidate_assignments: list[tuple[int, int]] = []
+    if selected_team_ids:
+        teams = list(db.scalars(select(Team).where(Team.id.in_(selected_team_ids))).all())
+        if len(teams) != len(selected_team_ids) or any(team.workspace_id not in (None, project.workspace_id) for team in teams):
+            raise HTTPException(status_code=400, detail="Select valid delivery teams")
+        global_team_ids = [team.id for team in teams if team.workspace_id is None]
+        workspace_team_ids = [team.id for team in teams if team.workspace_id is not None]
+        if global_team_ids:
+            candidate_assignments.extend(db.execute(
+                select(GlobalTeamMember.user_id, GlobalTeamMember.team_id).where(GlobalTeamMember.team_id.in_(global_team_ids))
+            ).all())
+        if workspace_team_ids:
+            # Legacy workspace teams may contribute members without requiring
+            # those people to be pre-allocated to this project.
+            candidate_assignments.extend(db.execute(
+                select(TeamMember.user_id, TeamMember.team_id).where(TeamMember.team_id.in_(workspace_team_ids))
+            ).all())
+        candidate_assignments = list(dict.fromkeys(candidate_assignments))
     try:
         plan, provider, model, fallback_used = generate_task_plan(
             project.name,
@@ -53,7 +66,11 @@ def plan_tasks(
     delivery_budget = (project.budget or 0) * (100 - project.contingency_percent) // 100
     total_weight = sum(task.story_points or 1 for task in plan.tasks) or len(plan.tasks)
     for index, task in enumerate(plan.tasks):
-        task.assignee_ids = [allocations[index % len(allocations)].user_id]
+        recommendation = candidate_assignments[index % len(candidate_assignments)] if candidate_assignments else None
+        task.team_ids = selected_team_ids
+        task.assignee_ids = [recommendation[0]] if recommendation else []
+        task.assignments = ([{"user_id": recommendation[0], "team_id": recommendation[1], "responsibility": task.title, "planned_hours": max(1, (task.story_points or 1) * 4)}] if recommendation else [])
+        task.estimated_days = working_days(db, task.start_date, task.end_date)
         task.estimated_hours = max(1, (task.story_points or 1) * 4)
         task.planned_budget = delivery_budget * (task.story_points or 1) // total_weight if delivery_budget else None
     return AITaskPlanResponse(
@@ -111,12 +128,15 @@ def confirm_task_plan(
             )
             task.story_points = generated.story_points
             task.estimated_hours = generated.estimated_hours
+            task.estimated_days = generated.estimated_days or working_days(db, generated.start_date, generated.end_date)
             task.planned_budget = generated.planned_budget
             set_task_schedule(task, None, None)
             db.add(task)
             db.flush()
-            for user_id in generated.assignee_ids:
-                db.add(TaskAssignee(task_id=task.id, user_id=user_id))
+            if generated.assignments:
+                set_task_assignments(db, task, project, [item.model_dump() for item in generated.assignments])
+            else:
+                set_task_assignees(db, task, project, generated.assignee_ids)
             for position, text_value in enumerate(generated.checklist):
                 item = ChecklistItem(text=text_value.strip(), position=position)
                 item.actions.append(ChecklistAction(user_id=current_user.id, action="created"))

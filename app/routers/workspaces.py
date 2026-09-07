@@ -14,7 +14,7 @@ from app.dependencies import (
 from app.core.skills import normalize_skills, parse_skills
 from app.core.profile import profile_completion, validate_profile_image
 from app.core.chat_access import sync_scoped_conversation_access
-from app.models import ChatConversation, ChatParticipant, ChatType, Comment, Department, Designation, GlobalDepartment, GlobalDesignation, Project, Task, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceMember, WorkspaceRole
+from app.models import ChatConversation, ChatParticipant, ChatType, Comment, Department, Designation, GlobalDepartment, GlobalDesignation, Project, Task, TaskAssignee, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     MemberAdd,
     MemberAccessUpdate,
@@ -221,7 +221,8 @@ def create_designation(
     if exists:
         raise HTTPException(status_code=409, detail="Designation already exists")
     designation = GlobalDesignation(
-        name=name, description=payload.description, department_id=department.id
+        name=name, description=payload.description, department_id=department.id,
+        hourly_rate=payload.hourly_rate,
     )
     db.add(designation);commit_catalog_change(db, "Designation already exists");db.refresh(designation)
     return designation
@@ -344,6 +345,10 @@ def list_workspaces(db: DB, current_user: CurrentUser) -> list[WorkspaceRead]:
                 Project.workspace_id == workspace.id,
                 Project.project_manager_id == current_user.id,
             ))
+            assigned = db.scalar(select(TaskAssignee.id).join(Task).join(Project).where(
+                Project.workspace_id == workspace.id,
+                TaskAssignee.user_id == current_user.id,
+            ))
             direct_chat = db.scalar(
                 select(ChatParticipant.id)
                 .join(ChatConversation, ChatConversation.id == ChatParticipant.conversation_id)
@@ -353,7 +358,7 @@ def list_workspaces(db: DB, current_user: CurrentUser) -> list[WorkspaceRead]:
                     ChatParticipant.user_id == current_user.id,
                 )
             )
-            if allocated is None and managed is None and direct_chat is None:
+            if allocated is None and managed is None and assigned is None and direct_chat is None:
                 continue
         visible.append(
             WorkspaceRead.model_validate(workspace).model_copy(update={"role": role})
@@ -524,8 +529,17 @@ def user_directory(
             Team.workspace_id == workspace_id
         ).distinct()
     ).all()
+    task_assignment_rows = db.execute(
+        select(TaskAssignee.user_id, Project.name)
+        .join(Task, Task.id == TaskAssignee.task_id)
+        .join(Project, Project.id == Task.project_id)
+        .where(Project.workspace_id == workspace_id)
+        .distinct()
+    ).all()
     projects_by_user: dict[int, list[str]] = {}
     for user_id, project_name in allocation_rows:
+        projects_by_user.setdefault(user_id, []).append(project_name)
+    for user_id, project_name in task_assignment_rows:
         projects_by_user.setdefault(user_id, []).append(project_name)
     return [UserDirectoryRead(
         user_id=user.id, name=user.name, email=user.email, is_active=user.is_active,

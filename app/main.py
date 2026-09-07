@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
+from time import perf_counter
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,6 +53,7 @@ async def lifespan(_: FastAPI):
             ))
     project_columns = {column["name"] for column in inspect(engine).get_columns("projects")}
     task_columns = {column["name"] for column in inspect(engine).get_columns("tasks")}
+    task_assignee_columns = {column["name"] for column in inspect(engine).get_columns("task_assignees")}
     team_member_columns = {column["name"] for column in inspect(engine).get_columns("team_members")}
     team_columns = {column["name"]: column for column in inspect(engine).get_columns("teams")}
     chat_message_columns = {column["name"] for column in inspect(engine).get_columns("chat_messages")} if inspect(engine).has_table("chat_messages") else set()
@@ -122,6 +124,10 @@ async def lifespan(_: FastAPI):
             ("projects", project_columns, "contingency_percent", "INTEGER NOT NULL DEFAULT 15"),
             ("tasks", task_columns, "estimated_hours", "INTEGER"),
             ("tasks", task_columns, "planned_budget", "INTEGER"),
+            ("tasks", task_columns, "estimated_days", "INTEGER"),
+            ("task_assignees", task_assignee_columns, "team_id", "INTEGER REFERENCES teams(id) ON DELETE SET NULL"),
+            ("task_assignees", task_assignee_columns, "responsibility", "VARCHAR(500)"),
+            ("task_assignees", task_assignee_columns, "planned_hours", "INTEGER"),
             ("tasks", task_columns, "actual_cost", "INTEGER"),
             ("team_members", team_member_columns, "allocation_percent", "INTEGER NOT NULL DEFAULT 100"),
             ("team_members", team_member_columns, "weekly_capacity_hours", "INTEGER NOT NULL DEFAULT 40"),
@@ -133,6 +139,8 @@ async def lifespan(_: FastAPI):
         for table, columns, column, definition in compatibility_columns:
             if column not in columns:
                 connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
+        if "hourly_rate" not in designation_columns:
+            connection.execute(text("ALTER TABLE global_designations ADD COLUMN hourly_rate INTEGER NOT NULL DEFAULT 0"))
         if chat_message_columns:
             if "is_deleted" not in chat_message_columns:
                 default = "0" if engine.dialect.name == "sqlite" else "FALSE"
@@ -184,6 +192,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_request_timing(request, call_next):
+    started = perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (perf_counter() - started) * 1000
+    response.headers["Server-Timing"] = f'app;dur={elapsed_ms:.1f}'
+    response.headers["X-Process-Time-Ms"] = f'{elapsed_ms:.1f}'
+    if elapsed_ms >= 500 and not request.url.path.startswith("/static/"):
+        logger.warning(
+            "Slow request method=%s path=%s status=%s duration_ms=%.1f",
+            request.method, request.url.path, response.status_code, elapsed_ms,
+        )
+    return response
 
 
 @app.exception_handler(OperationalError)

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import decode_access_token
 from app.database import get_db
-from app.models import Project, Team, TeamMember, User, WorkspaceMember, WorkspaceRole
+from app.models import Project, Task, TaskAssignee, Team, TeamMember, User, WorkspaceMember, WorkspaceRole
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 DB = Annotated[Session, Depends(get_db)]
@@ -65,7 +65,11 @@ def require_workspace_member(
             Project.workspace_id == workspace_id,
             Project.project_manager_id == user_id,
         ))
-        if allocated is None and managed is None:
+        assigned = db.scalar(select(TaskAssignee.id).join(Task).join(Project).where(
+            Project.workspace_id == workspace_id,
+            TaskAssignee.user_id == user_id,
+        ))
+        if allocated is None and managed is None and assigned is None:
             raise HTTPException(status_code=404, detail="Workspace not found")
     return membership
 
@@ -105,7 +109,10 @@ def require_project_contributor(db: Session, project_id: int, user_id: int) -> W
             TeamMember.project_id == project_id, TeamMember.user_id == user_id
         )
     )
-    if allocated is None:
+    assigned = db.scalar(select(TaskAssignee.id).join(Task).where(
+        Task.project_id == project_id, TaskAssignee.user_id == user_id
+    ))
+    if allocated is None and assigned is None:
         raise HTTPException(status_code=403, detail="Project allocation required")
     return membership
 
