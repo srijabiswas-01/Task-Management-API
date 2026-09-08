@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import func, select
@@ -373,6 +373,85 @@ def list_skill_assignment_projects(db: DB, current_user: CurrentUser) -> list[di
         .order_by(Workspace.name, Project.name)
     ).all()
     return [{"id": project_id, "name": project_name, "workspace_name": workspace_name} for project_id, project_name, workspace_name in rows]
+
+
+@router.get("/team-member-analytics")
+def team_member_analytics(db: DB, current_user: CurrentUser) -> dict:
+    """Global, read-only resource analytics used by every dashboard toggle."""
+    require_system_admin(current_user)
+    users = [user for user in global_users(db) if user.is_member or user.is_system_admin]
+    memberships = list(db.scalars(select(GlobalTeamMember).options(
+        selectinload(GlobalTeamMember.team)
+    )).all())
+    membership_by_user = {item.user_id: item for item in memberships}
+    teams = list(db.scalars(select(Team).options(
+        selectinload(Team.manager_record).selectinload(TeamManager.user)
+    ).order_by(Team.name)).all())
+    projects = list(db.scalars(select(Project).options(selectinload(Project.workspace))).all())
+    project_by_id = {item.id: item for item in projects}
+    tasks = list(db.scalars(select(Task).options(selectinload(Task.task_assignees))).all())
+    assignments_by_user: dict[int, list[tuple[Task, TaskAssignee]]] = {}
+    assignments_by_team: dict[int, list[tuple[Task, TaskAssignee]]] = {}
+    for task in tasks:
+        for assignment in task.task_assignees:
+            assignments_by_user.setdefault(assignment.user_id, []).append((task, assignment))
+            if assignment.team_id:
+                assignments_by_team.setdefault(assignment.team_id, []).append((task, assignment))
+    rates = {item.name: item.hourly_rate for item in db.scalars(select(GlobalDesignation)).all()}
+    today = date.today()
+    member_rows = []
+    for user in users:
+        profile = user.profile
+        completion, missing = profile_completion(user, profile)
+        membership = membership_by_user.get(user.id)
+        assignments = assignments_by_user.get(user.id, [])
+        active = [(task, item) for task, item in assignments if task.status != TaskStatus.done]
+        done = [(task, item) for task, item in assignments if task.status == TaskStatus.done]
+        overdue = [(task, item) for task, item in active if task.due_date and task.due_date < today]
+        hours = sum(item.planned_hours or 0 for _, item in active)
+        rate = rates.get(profile.professional_title, 0) if profile else 0
+        project_ids = sorted({task.project_id for task, _ in assignments})
+        member_rows.append({
+            "id": user.id, "name": user.name, "email": user.email,
+            "profile_image": profile.profile_image if profile else None,
+            "role": "admin" if user.is_system_admin else "member", "is_active": user.is_active,
+            "department": profile.department if profile else None,
+            "designation": profile.professional_title if profile else None,
+            "skills": parse_skills(profile.skills if profile else None),
+            "completion_percent": completion, "missing_fields": missing,
+            "team_id": membership.team_id if membership else None,
+            "team_name": membership.team.name if membership else None,
+            "hourly_rate": rate, "active_tasks": len(active), "completed_tasks": len(done),
+            "overdue_tasks": len(overdue), "planned_hours": hours,
+            "planned_cost": hours * rate,
+            "average_progress": round(sum(task.progress for task, _ in assignments) / len(assignments)) if assignments else 0,
+            "project_ids": project_ids,
+            "tasks": [{"id": task.id, "title": task.title, "project_id": task.project_id,
+                "project_name": project_by_id[task.project_id].name, "status": task.status.value,
+                "progress": task.progress, "due_date": task.due_date,
+                "responsibility": item.responsibility, "planned_hours": item.planned_hours}
+                for task, item in assignments],
+        })
+    team_rows = []
+    for team in teams:
+        team_members = [row for row in member_rows if row["team_id"] == team.id]
+        assigned = assignments_by_team.get(team.id, [])
+        unique_tasks = {task.id: task for task, _ in assigned}.values()
+        active_tasks = [task for task in unique_tasks if task.status != TaskStatus.done]
+        completed_tasks = [task for task in unique_tasks if task.status == TaskStatus.done]
+        overdue_tasks = [task for task in active_tasks if task.due_date and task.due_date < today]
+        hours = sum(item.planned_hours or 0 for task, item in assigned if task.status != TaskStatus.done)
+        team_rows.append({"id": team.id, "name": team.name, "description": team.description,
+            "manager_id": team.manager_user_id, "manager_name": team.manager_user.name if team.manager_user else None,
+            "manager_designation": team.manager_designation, "members": len(team_members),
+            "member_ids": [row["id"] for row in team_members], "active_tasks": len(active_tasks),
+            "completed_tasks": len(completed_tasks), "overdue_tasks": len(overdue_tasks),
+            "average_progress": round(sum(task.progress for task in unique_tasks) / len(unique_tasks)) if unique_tasks else 0,
+            "planned_hours": hours, "planned_cost": sum(row["planned_cost"] for row in team_members),
+            "project_ids": sorted({task.project_id for task in unique_tasks})})
+    return {"generated_at": datetime.now(timezone.utc), "members": member_rows, "teams": team_rows,
+        "projects": [{"id": item.id, "name": item.name, "workspace_id": item.workspace_id,
+            "workspace_name": item.workspace.name, "budget": item.budget} for item in projects]}
 
 
 @router.get("/departments", response_model=list[DepartmentRead])

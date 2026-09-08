@@ -40,6 +40,9 @@ def test_register_login_and_me(client: TestClient):
     assert global_users.status_code == 200
     assert global_users.json()[0]["email"] == "jane@example.com"
     assert client.get("/admin/skills", headers=admin_headers).status_code == 200
+    analytics = client.get("/admin/team-member-analytics", headers=admin_headers)
+    assert analytics.status_code == 200
+    assert {"members", "teams", "projects"}.issubset(analytics.json())
 
 
 def test_global_skill_catalog_rename_and_delete_sync_profiles(
