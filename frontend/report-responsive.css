@@ -1,0 +1,79 @@
+/* Responsive controls shared by Project report, Gantt and Team & member analytics. */
+.report-filters,
+.timeline-filters,
+.analytics-filters {
+  align-items: stretch;
+  container-type: inline-size;
+  min-width: 0;
+}
+
+.report-filters > *,
+.timeline-filters > *,
+.analytics-filters > * {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.report-filters {
+  grid-template-columns: minmax(220px, 1.6fr) repeat(3, minmax(130px, 1fr));
+}
+
+.timeline-filters {
+  grid-template-columns: minmax(220px, 1.6fr) repeat(2, minmax(140px, 1fr)) repeat(2, minmax(125px, .8fr)) auto;
+}
+
+.analytics-filters {
+  grid-template-columns: minmax(220px, 2fr) repeat(4, minmax(125px, 1fr));
+}
+
+.analytics-filters > button:last-child {
+  justify-self: stretch;
+}
+
+.report-filter-panel .panel-header,
+.gantt-timeline-panel .panel-header,
+.analytics-page .page-heading,
+.analytics-page .panel-header {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+@media (max-width: 1250px) {
+  .timeline-filters,
+  .analytics-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .timeline-filters > input:first-child,
+  .analytics-filters > input:first-child { grid-column: span 2; }
+  .report-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .report-filters > input:first-child { grid-column: 1 / -1; }
+}
+
+@media (max-width: 850px) {
+  .timeline-filters,
+  .analytics-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .timeline-filters > input:first-child,
+  .analytics-filters > input:first-child { grid-column: 1 / -1; }
+  .report-range { gap: 12px; }
+  .analytics-table-wrap,
+  .timeline-table-scroll { max-width: 100%; }
+}
+
+@media (max-width: 600px) {
+  .report-filters,
+  .report-range,
+  .timeline-filters,
+  .analytics-filters { grid-template-columns: minmax(0, 1fr); }
+  .timeline-filters > input:first-child,
+  .analytics-filters > input:first-child,
+  .report-filters > input:first-child { grid-column: auto; }
+  .report-filter-panel,
+  .gantt-timeline-panel,
+  .analytics-filters { padding: 12px; }
+  .report-filter-panel .panel-header > div:last-child,
+  .gantt-timeline-panel .panel-header > div:last-child,
+  .analytics-page .page-heading > div:last-child { width: 100%; }
+  .report-filter-panel .panel-header button,
+  .gantt-timeline-panel .panel-header button,
+  .analytics-page .page-heading button { width: 100%; }
+}

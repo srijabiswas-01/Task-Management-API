@@ -66,7 +66,29 @@ function pdfLabel(value,x,y,size=9,color="#17233c",bold=false,maxWidth=0){let te
 function pdfWrapped(value,x,y,width,size=8,color="#17233c",bold=false,maxLines=5,lineHeight=size+3){const words=String(value??"").replace(/\s+/g," ").trim().split(" ").filter(Boolean),limit=Math.max(5,Math.floor(width/(size*.52))),lines=[];let line="";words.forEach(word=>{const next=line?`${line} ${word}`:word;if(next.length<=limit)line=next;else{if(line)lines.push(line);line=word}});if(line)lines.push(line);if(!lines.length)lines.push("Not provided");const shown=lines.slice(0,maxLines);if(lines.length>maxLines)shown[maxLines-1]=shown[maxLines-1].slice(0,Math.max(1,limit-3))+"...";return shown.map((text,index)=>pdfLabel(text,x,y+index*lineHeight,size,color,bold,width))}
 function taskPdfContext(task){const assignments=task.assignments||[];return {assignments,members:assignments.map(item=>state.members.find(member=>member.user_id===item.user_id)?.user?.name||`Member #${item.user_id}`),teams:[...new Set(assignments.map(item=>state.teams.find(team=>team.id===item.team_id)?.name).filter(Boolean))]}}
 function appendTaskDetailPdfPages(pages,title,tasks){tasks.forEach(task=>{const ctx=taskPdfContext(task),page=pdfPageHeader(`${title} — Task detail`,`Complete task record and allocation detail`,pages.length+1),money=value=>value==null?"Not set":`INR ${Number(value).toLocaleString("en-IN")}`;page.push(pdfRect(32,92,778,58,"#526dff"),pdfLabel(task.title,48,106,17,"#ffffff",true,600),pdfLabel(`${pretty(task.status)} · ${pretty(task.priority)} priority · ${task.progress}% complete`,48,130,9,"#e7eaff",false,700));const facts=[["Schedule",`${task.start_date?date(task.start_date):"Not set"} - ${task.due_date?date(task.due_date):"Not set"}`],["Estimated effort",`${task.estimated_days??"-"} working days / ${task.estimated_hours??"-"} hours`],["Planned cost",money(task.planned_budget)],["Actual cost",money(task.actual_cost)],["Story points",task.story_points??"Not set"],["Checklist",`${task.checklist_done||0}/${task.checklist_total||0} completed`]];facts.forEach(([label,value],index)=>{const col=index%3,row=Math.floor(index/3),x=32+col*263,y=168+row*58;page.push(pdfRect(x,y,251,48,"#ffffff","#e4e9f1"),pdfLabel(label,x+10,y+8,7,"#71809c",true,230),pdfLabel(value,x+10,y+24,10,"#17233c",true,230))});page.push(pdfLabel("Description / acceptance context",32,298,11,"#17233c",true),...pdfWrapped(task.description||"No description provided",32,319,778,8,"#526076",false,5,12),pdfLabel("Teams and assigned members",32,390,11,"#17233c",true));if(ctx.assignments.length){ctx.assignments.slice(0,10).forEach((item,index)=>{const member=state.members.find(entry=>entry.user_id===item.user_id),team=state.teams.find(entry=>entry.id===item.team_id),label=`${member?.user?.name||`Member #${item.user_id}`} · ${member?.user?.professional_title||"Designation not set"} · ${team?.name||"Team not set"} · ${item.planned_hours||0}h`;page.push(pdfLabel(label,42,412+index*15,7.5,"#17233c",index===0,730))})}else page.push(pdfLabel("No team or member is assigned to this task.",42,414,8,"#71809c"));pages.push(page)})}
+function appendPdfTablePages(pages,title,subtitle,headers,widths,rows,pageSize=11){
+  for(let offset=0;offset<Math.max(1,rows.length);offset+=pageSize){
+    const group=rows.slice(offset,offset+pageSize),page=pdfPageHeader(title,subtitle,pages.length+1);let x=24;
+    headers.forEach((header,index)=>{page.push(pdfRect(x,92,widths[index],28,"#edf0f6","#dfe5ef"),pdfLabel(header,x+5,101,7,"#17233c",true,widths[index]-10));x+=widths[index]});
+    group.forEach((row,rowIndex)=>{const y=120+rowIndex*39;let cellX=24;row.forEach((value,index)=>{page.push(pdfRect(cellX,y,widths[index],39,rowIndex%2?"#f8f9fc":"#ffffff","#e4e9f1"),pdfLabel(value,cellX+5,y+13,7,"#17233c",index===0,widths[index]-10));cellX+=widths[index]})});
+    if(!group.length)page.push(pdfLabel("No matching records",32,145,10,"#71809c",true));pages.push(page);
+  }
+}
+function appendCompleteExportData(pages,fileName){
+  if(fileName.includes("project-report")||fileName.includes("gantt-chart-and-timeline")){
+    const rows=state.tasks.flatMap(task=>(task.assignments||[]).map(item=>{const member=state.members.find(entry=>entry.user_id===item.user_id),team=state.teams.find(entry=>entry.id===item.team_id);return [task.title,member?.user?.name||`Member #${item.user_id}`,team?.name||"No team",item.responsibility||"Not specified",`${item.planned_hours||0} h`]}));
+    appendPdfTablePages(pages,`${state.project?.name||"Project"} - Complete allocations`,"Every task, team and member allocation included",["Task","Member","Team","Responsibility","Hours"],[190,145,135,235,73],rows);
+  }
+  if(fileName.includes("team-member-analytics")){
+    const {members,teams}=analyticsData(),skills={},coverage={};
+    members.forEach(item=>{(item.skills||[]).forEach(skill=>skills[skill]=(skills[skill]||0)+1);const key=`${item.department||"Unassigned"} / ${item.designation||"No designation"}`;coverage[key]=(coverage[key]||0)+1});
+    appendPdfTablePages(pages,"Complete skills coverage","All skills in the filtered analytics dataset",["Skill","People"],[650,128],Object.entries(skills).sort((a,b)=>b[1]-a[1]).map(([name,count])=>[name,String(count)]));
+    appendPdfTablePages(pages,"Complete department coverage","All department and designation combinations",["Department / designation","People"],[650,128],Object.entries(coverage).sort((a,b)=>b[1]-a[1]).map(([name,count])=>[name,String(count)]));
+    appendPdfTablePages(pages,"Complete team cost analysis","All matching teams; no dashboard-card truncation",["Team","Members","Tasks","Planned hours","Planned cost"],[250,95,95,145,193],teams.map(team=>[team.name,String(team.member_count),String(team.task_count),String(team.planned_hours),`INR ${Number(team.planned_cost||0).toLocaleString("en-IN")}`]));
+  }
+}
 function downloadVisualPdf(pages,fileName){
+  appendCompleteExportData(pages,fileName);
   const objects=[null,null,null,"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>","<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>"],pageIds=[];
   pages.forEach(commands=>{const pageId=objects.length,contentId=pageId+1,stream=commands.join("\n");pageIds.push(pageId);objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PDF_W} ${PDF_H}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>`);objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`)});
   objects[1]="<< /Type /Catalog /Pages 2 0 R >>";objects[2]=`<< /Type /Pages /Kids [${pageIds.map(id=>`${id} 0 R`).join(" ")}] /Count ${pageIds.length} >>`;
@@ -82,7 +104,7 @@ function exportBoardPdf(){
   downloadVisualPdf(pages,`${safeFileName(state.project.name)}-task-board`);toast("Complete task board PDF downloaded");
 }
 function exportGanttPdf(){
-  const scheduled=state.tasks.map(task=>{const start=task.start_at||task.start_date,end=task.end_at||task.due_date;return start&&end?{task,start:new Date(start),end:new Date(end)}:null}).filter(Boolean).sort((a,b)=>a.start-b.start);let rangeStart=new Date();rangeStart.setHours(0,0,0,0);rangeStart.setDate(rangeStart.getDate()-3),rangeEnd=new Date(rangeStart);rangeEnd.setDate(rangeEnd.getDate()+30);if(scheduled.length){rangeStart=new Date(Math.min(rangeStart,...scheduled.map(x=>x.start)));rangeStart.setHours(0,0,0,0);rangeEnd=new Date(Math.max(rangeEnd,...scheduled.map(x=>x.end)))}const totalDays=Math.min(120,Math.max(1,Math.ceil((rangeEnd-rangeStart)/86400000)+1)),pages=[];
+  const scheduled=state.tasks.map(task=>{const start=task.start_at||task.start_date,end=task.end_at||task.due_date;return start&&end?{task,start:new Date(start),end:new Date(end)}:null}).filter(Boolean).sort((a,b)=>a.start-b.start);let rangeStart=new Date();rangeStart.setHours(0,0,0,0);rangeStart.setDate(rangeStart.getDate()-3),rangeEnd=new Date(rangeStart);rangeEnd.setDate(rangeEnd.getDate()+30);if(scheduled.length){rangeStart=new Date(Math.min(rangeStart,...scheduled.map(x=>x.start)));rangeStart.setHours(0,0,0,0);rangeEnd=new Date(Math.max(rangeEnd,...scheduled.map(x=>x.end)))}const totalDays=Math.max(1,Math.ceil((rangeEnd-rangeStart)/86400000)+1),pages=[];
   const taskGroups=scheduled.length?Array.from({length:Math.ceil(scheduled.length/11)},(_,i)=>scheduled.slice(i*11,i*11+11)):[[]];for(let dayOffset=0;dayOffset<totalDays;dayOffset+=21){const dayCount=Math.min(21,totalDays-dayOffset);taskGroups.forEach(group=>{const page=pdfPageHeader(`${state.project.name} — Gantt Chart`,`${date(new Date(rangeStart.getTime()+dayOffset*86400000))} — ${date(new Date(rangeStart.getTime()+(dayOffset+dayCount-1)*86400000))}`,pages.length+1),nameW=185,gridX=217,gridW=593,dayW=gridW/dayCount,rowY=125,rowH=36;page.push(pdfRect(32,92,778,33,"#edf0f6","#e4e9f1"),pdfLabel("Task",42,103,9,"#17233c",true));for(let d=0;d<dayCount;d++){const current=new Date(rangeStart.getTime()+(dayOffset+d)*86400000),x=gridX+d*dayW;page.push(pdfLine(x,92,x,rowY+Math.max(1,group.length)*rowH,"#d9dfeb"),pdfLabel(current.toLocaleDateString(undefined,{month:"short"}),x+3,97,6,"#71809c",true,dayW-3),pdfLabel(current.getDate(),x+3,108,7,"#17233c",false,dayW-3))}group.forEach(({task,start,end},row)=>{const y=rowY+row*rowH;page.push(pdfRect(32,y,778,rowH,"#ffffff","#e4e9f1"),pdfLabel(task.title,42,y+8,8,"#17233c",true,nameW-20),pdfLabel(`${pretty(task.status)} · ${task.progress}%`,42,y+21,6,"#71809c",false,nameW-20));const startIndex=Math.floor((start-rangeStart)/86400000),endIndex=Math.max(startIndex,Math.ceil((end-rangeStart)/86400000)),visibleStart=Math.max(startIndex,dayOffset),visibleEnd=Math.min(endIndex+1,dayOffset+dayCount);if(visibleEnd>visibleStart){const colors={done:"#23a06b",in_progress:"#e59a29",review:"#8557d8",testing:"#8557d8"},barX=gridX+(visibleStart-dayOffset)*dayW+2,barW=Math.max(5,(visibleEnd-visibleStart)*dayW-4);page.push(pdfRect(barX,y+9,barW,18,colors[task.status]||"#526dff"),pdfLabel(`${task.progress}%`,barX+5,y+14,6,"#ffffff",true,barW-8))}});if(!group.length)page.push(pdfLabel("No scheduled tasks",42,145,10,"#71809c",true));pages.push(page)})}
   const timeline=ganttTimelineRows();
   const widths=[150,90,65,185,68,65,105,50],headers=["Task","Timeline","Duration","Teams and members","Status","Progress","Milestone","Health"];
@@ -419,7 +441,20 @@ async function loadNotifications(renderPage=false){
   const data=await api(`/notifications?limit=${fullList?50:8}`);
   state.notifications=data.items;state.notificationUnread=data.unread_count;state.notificationCritical=data.critical_count;
   renderNotificationHeader();
+  showNotificationReminder(data.items);
   if(renderPage&&state.view==="notifications")render();
+}
+function showNotificationReminder(items=[]){
+  if(document.querySelector(".notification-reminder-popup"))return;
+  const item=items.find(entry=>entry.reminder_due&&!entry.is_read);if(!item)return;
+  api("/notifications/reminders-shown",{method:"POST",body:JSON.stringify({notification_ids:[String(item.id)]})}).catch(()=>{});
+  const popup=document.createElement("aside");popup.className="notification-reminder-popup";popup.setAttribute("role","alertdialog");popup.setAttribute("aria-labelledby","notification-reminder-title");
+  popup.innerHTML=`<small>Unread for 24 hours</small><h3 id="notification-reminder-title">${esc(item.title)}</h3><p>${esc(item.message)}</p><time>${dateTime(item.created_at)}</time><div class="notification-reminder-actions"><button type="button" class="btn" data-remind-later>Remind me later</button>${item.severity!=="critical"?'<button type="button" class="btn" data-reminder-read>Mark as read</button>':""}<button type="button" class="btn primary" data-reminder-open>Open notification</button></div>`;
+  const close=()=>{popup.classList.add("removing");setTimeout(()=>{popup.remove();showNotificationReminder(items.filter(entry=>entry.id!==item.id))},180)};
+  popup.querySelector("[data-remind-later]").onclick=close;
+  popup.querySelector("[data-reminder-read]")?.addEventListener("click",async()=>{try{await api(`/notifications/${item.id}/read`,{method:"PATCH"});item.is_read=true;close();await loadNotifications(state.view==="notifications")}catch(error){toast(error.message,true)}});
+  popup.querySelector("[data-reminder-open]").onclick=async()=>{close();if(item.conversation_id){state.activeChatId=item.conversation_id;navigate("chat");await loadChats()}else{navigate("notifications");await loadNotifications(true)}};
+  document.body.appendChild(popup);
 }
 function renderNotificationHeader(){
   const count=$("#notification-count"),sidebarCount=$("#sidebar-notification-count"),menu=$("#notification-menu");if(!count||!menu)return;
@@ -827,7 +862,7 @@ function ganttView() {
     if(earliest<rangeStart){rangeStart=new Date(earliest);rangeStart.setDate(rangeStart.getDate()-2)}
     if(latest>rangeEnd){rangeEnd=new Date(latest);rangeEnd.setDate(rangeEnd.getDate()+3)}
   }
-  const totalDays=Math.max(1,Math.min(120,Math.ceil((rangeEnd-rangeStart)/86400000)+1));
+  const totalDays=Math.max(1,Math.ceil((rangeEnd-rangeStart)/86400000)+1);
   rangeEnd=new Date(rangeStart);rangeEnd.setDate(rangeEnd.getDate()+totalDays-1);
   const days=Array.from({length:totalDays},(_,index)=>{const d=new Date(rangeStart);d.setDate(d.getDate()+index);return d});
   const rows=scheduled.map(({task,start,end})=>{
@@ -1184,13 +1219,13 @@ function bindView() {
   $("#analytics-pdf")?.addEventListener("click",exportAnalyticsPdf);
   $("#analytics-refresh")?.addEventListener("click",async()=>{try{state.analytics=await cachedApi("/admin/team-member-analytics",{force:true});render();toast("Analytics refreshed")}catch(err){toast(err.message,true)}});
   $$('[data-analytics-tab]').forEach(button=>button.onclick=()=>{state.analyticsTab=button.dataset.analyticsTab;render()});
-  const analyticsSearch=$("#analytics-search");if(analyticsSearch){let timer;analyticsSearch.oninput=()=>{clearTimeout(timer);state.analyticsFilters.query=analyticsSearch.value;state.analyticsPages={teams:1,members:1};timer=setTimeout(render,180)}}
+  const analyticsSearch=$("#analytics-search");if(analyticsSearch){let timer;analyticsSearch.oninput=()=>{clearTimeout(timer);state.analyticsFilters.query=analyticsSearch.value;state.analyticsPages={teams:1,members:1};const caret=analyticsSearch.selectionStart;timer=setTimeout(()=>{render();const next=$("#analytics-search");next?.focus();if(next&&caret!==null)next.setSelectionRange(caret,caret)},180)}}
   $$('[data-analytics-filter]').forEach(input=>input.onchange=()=>{state.analyticsFilters[input.dataset.analyticsFilter]=input.value;state.analyticsPages={teams:1,members:1};render()});
   $("#analytics-reset")?.addEventListener("click",()=>{state.analyticsFilters={query:"",role:"",status:"",department:"",designation:"",team:"",project:"",skill:"",eligibility:""};state.analyticsPages={teams:1,members:1};render()});
   $$('[data-analytics-page]').forEach(button=>button.onclick=()=>{const [type,page]=button.dataset.analyticsPage.split(":");state.analyticsPages[type]=Number(page);render()});
   $$('[data-analytics-team]').forEach(button=>button.onclick=()=>openAnalyticsDrawer("team",Number(button.dataset.analyticsTeam)));
   $$('[data-analytics-member]').forEach(button=>button.onclick=()=>openAnalyticsDrawer("member",Number(button.dataset.analyticsMember)));
-  const reportSearch=$("#report-search");if(reportSearch){let timer;reportSearch.oninput=()=>{clearTimeout(timer);state.reportFilters.query=reportSearch.value;timer=setTimeout(render,180)}}
+  const reportSearch=$("#report-search");if(reportSearch){let timer;reportSearch.oninput=()=>{clearTimeout(timer);state.reportFilters.query=reportSearch.value;const caret=reportSearch.selectionStart;timer=setTimeout(()=>{render();const next=$("#report-search");next?.focus();if(next&&caret!==null)next.setSelectionRange(caret,caret)},180)}}
   [["#report-status","status"],["#report-team","team"],["#report-cost","cost"]].forEach(([selector,key])=>{const input=$(selector);if(input)input.onchange=()=>{state.reportFilters[key]=input.value;render()}});
   [["#report-progress-min","minProgress"],["#report-progress-max","maxProgress"]].forEach(([selector,key])=>{const input=$(selector);if(input)input.oninput=()=>{state.reportFilters[key]=Number(input.value);if(state.reportFilters.minProgress>state.reportFilters.maxProgress){if(key==="minProgress")state.reportFilters.maxProgress=state.reportFilters.minProgress;else state.reportFilters.minProgress=state.reportFilters.maxProgress}render()}});
   $("#report-filter-reset")?.addEventListener("click",()=>{state.reportFilters={query:"",status:"",team:"",cost:"",minProgress:0,maxProgress:100};render()});

@@ -425,6 +425,9 @@ class ChatNotification(TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(220))
     message: Mapped[str] = mapped_column(Text)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_persistent: Mapped[bool] = mapped_column(Boolean, default=False)
 
     conversation: Mapped["ChatConversation"] = relationship()
 
@@ -697,6 +700,9 @@ class Notification(TimestampMixin, Base):
     is_acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
     is_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_persistent: Mapped[bool] = mapped_column(Boolean, default=False)
 
     user: Mapped["User"] = relationship(back_populates="notifications")
 
@@ -720,6 +726,9 @@ class ProfileCompletionReminder(TimestampMixin, Base):
     completion_percent: Mapped[int] = mapped_column(Integer, default=0)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     is_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_persistent: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class GlobalProfileReminder(TimestampMixin, Base):
@@ -734,6 +743,9 @@ class GlobalProfileReminder(TimestampMixin, Base):
     completion_percent: Mapped[int] = mapped_column(Integer, default=0)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     is_resolved: Mapped[bool] = mapped_column(Boolean, default=False)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_persistent: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class GlobalAnnouncement(TimestampMixin, Base):
@@ -745,3 +757,6 @@ class GlobalAnnouncement(TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(220))
     message: Mapped[str] = mapped_column(Text)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_persistent: Mapped[bool] = mapped_column(Boolean, default=False)

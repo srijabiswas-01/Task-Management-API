@@ -338,7 +338,7 @@ def list_messages(workspace_id: int, conversation_id: int, db: DB, current_user:
             ChatNotification.conversation_id == conversation.id,
             ChatNotification.user_id == current_user.id,
             ChatNotification.is_read.is_(False),
-        ).values(is_read=True)
+        ).values(is_read=True, read_at=datetime.now(timezone.utc))
     )
     db.commit()
     cutoff = participant.access_revoked_at if participant else None
@@ -573,7 +573,7 @@ def create_global_conversation(payload: ChatConversationCreate, db: DB, current_
 def list_global_messages(conversation_id:int,db:DB,current_user:CurrentUser,limit:int=Query(100,ge=1,le=200))->list[ChatMessageRead]:
     conversation=global_chat(db,conversation_id,current_user);participant=next((item for item in conversation.participants if item.user_id==current_user.id),None)
     if participant:participant.last_read_at=datetime.now(timezone.utc)
-    for alert in db.scalars(select(ChatNotification).where(ChatNotification.conversation_id==conversation.id,ChatNotification.user_id==current_user.id,ChatNotification.is_read.is_(False))).all():alert.is_read=True
+    for alert in db.scalars(select(ChatNotification).where(ChatNotification.conversation_id==conversation.id,ChatNotification.user_id==current_user.id,ChatNotification.is_read.is_(False))).all():alert.is_read=True;alert.read_at=datetime.now(timezone.utc)
     db.commit()
     filters=[ChatMessage.conversation_id==conversation.id]
     if participant and participant.access_revoked_at is not None:filters.append(ChatMessage.created_at<=participant.access_revoked_at)

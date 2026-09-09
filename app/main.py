@@ -1,5 +1,6 @@
-from contextlib import asynccontextmanager
 from collections import defaultdict, deque
+import asyncio
+from contextlib import asynccontextmanager, suppress
 import logging
 from pathlib import Path
 from time import monotonic, perf_counter
@@ -14,7 +15,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.database import Base, engine
+from app.database import Base, SessionLocal, engine
 from app.models import Department, Designation, GlobalDepartment, GlobalDesignation
 from app.routers import admin, ai, auth, boards, chat, notifications, projects, tasks, workspaces
 
@@ -22,15 +23,49 @@ logger = logging.getLogger(__name__)
 request_buckets: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
 
+async def notification_cleanup_loop() -> None:
+    while True:
+        try:
+            with SessionLocal() as db:
+                notifications.cleanup_expired_notifications(db)
+        except Exception:
+            logger.exception("Notification retention cleanup failed")
+        await asyncio.sleep(3600)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if settings.environment.casefold() in {"production", "prod"}:
         # Production schemas are managed exclusively by Alembic. Application
         # workers must never race each other while executing DDL.
-        yield
+        cleanup_task = asyncio.create_task(notification_cleanup_loop())
+        try:
+            yield
+        finally:
+            cleanup_task.cancel()
+            with suppress(asyncio.CancelledError): await cleanup_task
         return
     # Alembic is preferred in production. This keeps local setup friction-free.
     Base.metadata.create_all(bind=engine)
+    lifecycle_tables = (
+        "notifications", "profile_completion_reminders", "global_profile_reminders",
+        "global_announcements", "chat_notifications",
+    )
+    for table_name in lifecycle_tables:
+        existing = {column["name"] for column in inspect(engine).get_columns(table_name)}
+        with engine.begin() as connection:
+            added_read_at = "read_at" not in existing
+            if "read_at" not in existing:
+                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN read_at TIMESTAMP"))
+            if "last_reminded_at" not in existing:
+                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN last_reminded_at TIMESTAMP"))
+            if "is_persistent" not in existing:
+                default = "0" if engine.dialect.name == "sqlite" else "FALSE"
+                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN is_persistent BOOLEAN NOT NULL DEFAULT {default}"))
+            if added_read_at:
+                truth = "1" if engine.dialect.name == "sqlite" else "TRUE"
+                connection.execute(text(f"UPDATE {table_name} SET read_at = CURRENT_TIMESTAMP WHERE is_read = {truth}"))
+            connection.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table_name}_read_at ON {table_name} (read_at)"))
     # create_all does not add columns to an existing local database. Keep this
     # small compatibility migration so current installations gain member access status.
     columns = {column["name"] for column in inspect(engine).get_columns("workspace_members")}
@@ -183,7 +218,12 @@ async def lifespan(_: FastAPI):
                 db.add(GlobalDepartment(name=item.name, description=item.description))
                 global_departments.add(item.name.casefold())
         db.commit()
-    yield
+    cleanup_task = asyncio.create_task(notification_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError): await cleanup_task
 
 
 app = FastAPI(

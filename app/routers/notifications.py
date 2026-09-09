@@ -1,7 +1,7 @@
 from datetime import datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
@@ -12,11 +12,41 @@ from app.schemas import (
     NotificationList,
     NotificationRead,
     NotificationReadAllResult,
+    NotificationReminderSeen,
     ProfileReminderResult,
     ProfileReminderSend,
 )
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
+
+NOTIFICATION_MODELS = (Notification, ProfileCompletionReminder, GlobalProfileReminder, GlobalAnnouncement, ChatNotification)
+RETENTION_PERIOD = timedelta(hours=24)
+
+
+def cleanup_expired_notifications(db: DB) -> int:
+    cutoff = datetime.now(timezone.utc) - RETENTION_PERIOD
+    removed = 0
+    for model in NOTIFICATION_MODELS:
+        result = db.execute(delete(model).where(
+            model.is_read.is_(True), model.read_at.is_not(None),
+            model.read_at <= cutoff, model.is_persistent.is_(False),
+        ))
+        removed += result.rowcount or 0
+    db.commit()
+    return removed
+
+
+def reminder_is_due(item, now: datetime) -> bool:
+    created_at = utc(item.created_at)
+    last_reminded = utc(item.last_reminded_at) if item.last_reminded_at else None
+    return not item.is_read and created_at <= now - RETENTION_PERIOD and (
+        last_reminded is None or last_reminded <= now - RETENTION_PERIOD
+    )
+
+
+def mark_read(item, now: datetime | None = None) -> None:
+    item.is_read = True
+    item.read_at = item.read_at or now or datetime.now(timezone.utc)
 
 
 def utc(value: datetime) -> datetime:
@@ -114,6 +144,7 @@ def list_notifications(
     limit: int = Query(default=50, ge=1, le=100),
     sync_tasks: bool = Query(default=False, deprecated=True),
 ) -> NotificationList:
+    cleanup_expired_notifications(db)
     # Retained as a no-op query parameter for older clients. GET is read-only;
     # deadline synchronization is explicitly triggered through POST below.
     active_filter = (
@@ -196,6 +227,16 @@ def list_notifications(
         created_at=item.created_at, updated_at=item.updated_at,
     ) for item in visible_chat_notifications)
     serialized.sort(key=lambda item: (item.is_resolved, -item.updated_at.timestamp()))
+    now = datetime.now(timezone.utc)
+    due_ids = {
+        *(str(item.id) for item in items if reminder_is_due(item, now)),
+        *(f"profile-{item.id}" for item in reminders if reminder_is_due(item, now)),
+        *(f"global-profile-{item.id}" for item in global_reminders if reminder_is_due(item, now)),
+        *(f"announcement-{item.id}" for item in announcements if reminder_is_due(item, now)),
+        *(f"chat-{item.id}" for item in visible_chat_notifications if reminder_is_due(item, now)),
+    }
+    for item in serialized:
+        item.reminder_due = item.id in due_ids
     reminder_unread = sum(1 for item in [*reminders, *global_reminders] if not item.is_resolved and not item.is_read)
     announcement_unread = sum(1 for item in announcements if not item.is_read)
     chat_unread = sum(1 for item in visible_chat_notifications if not item.is_read)
@@ -254,6 +295,7 @@ def send_global_profile_completion_reminders(
             db.add(reminder)
         reminder.title = title; reminder.message = message
         reminder.completion_percent = percent; reminder.is_read = False; reminder.is_resolved = False
+        reminder.read_at = None; reminder.last_reminded_at = None
         sent_count += 1
     db.commit()
     return ProfileReminderResult(sent_count=sent_count)
@@ -308,6 +350,8 @@ def send_profile_completion_reminders(
             reminder.message = message
             reminder.completion_percent = percent
             reminder.is_read = False
+            reminder.read_at = None
+            reminder.last_reminded_at = None
             reminder.is_resolved = False
         sent_count += 1
     db.commit()
@@ -348,8 +392,9 @@ def mark_all_normal_notifications_read(
     chat_notifications = list(db.scalars(select(ChatNotification).where(
         ChatNotification.user_id == current_user.id, ChatNotification.is_read.is_(False)
     )).all())
+    now = datetime.now(timezone.utc)
     for notification in [*normal_notifications, *profile_reminders, *global_profile_reminders, *announcements, *chat_notifications]:
-        notification.is_read = True
+        mark_read(notification, now)
     db.commit()
     return NotificationReadAllResult(
         marked_count=len(normal_notifications) + len(profile_reminders) + len(global_profile_reminders) + len(announcements) + len(chat_notifications)
@@ -365,14 +410,14 @@ def mark_notification_read(
         except ValueError as error: raise HTTPException(status_code=404, detail="Notification not found") from error
         item = db.scalar(select(GlobalAnnouncement).where(GlobalAnnouncement.id == item_id, GlobalAnnouncement.user_id == current_user.id))
         if item is None: raise HTTPException(status_code=404, detail="Notification not found")
-        item.is_read = True; db.commit(); db.refresh(item)
+        mark_read(item); db.commit(); db.refresh(item)
         return NotificationRead(id=f"announcement-{item.id}", kind="announcement", severity="normal", title=item.title, message=item.message, is_read=True, is_acknowledged=False, is_resolved=False, created_at=item.created_at, updated_at=item.updated_at)
     if notification_id.startswith("global-profile-"):
         try: item_id = int(notification_id.removeprefix("global-profile-"))
         except ValueError as error: raise HTTPException(status_code=404, detail="Notification not found") from error
         item = db.scalar(select(GlobalProfileReminder).where(GlobalProfileReminder.id == item_id, GlobalProfileReminder.user_id == current_user.id))
         if item is None: raise HTTPException(status_code=404, detail="Notification not found")
-        item.is_read = True; db.commit(); db.refresh(item)
+        mark_read(item); db.commit(); db.refresh(item)
         return NotificationRead(id=f"global-profile-{item.id}", kind="profile_completion", severity="normal", title=item.title, message=item.message, is_read=True, is_acknowledged=False, is_resolved=item.is_resolved, created_at=item.created_at, updated_at=item.updated_at)
     if notification_id.startswith("chat-"):
         try:
@@ -384,7 +429,7 @@ def mark_notification_read(
         ))
         if alert is None:
             raise HTTPException(status_code=404, detail="Notification not found")
-        alert.is_read = True; db.commit(); db.refresh(alert)
+        mark_read(alert); db.commit(); db.refresh(alert)
         return NotificationRead(
             id=f"chat-{alert.id}", workspace_id=alert.workspace_id,
             conversation_id=alert.conversation_id, kind="chat_message", severity="normal",
@@ -403,7 +448,7 @@ def mark_notification_read(
         ))
         if reminder is None:
             raise HTTPException(status_code=404, detail="Notification not found")
-        reminder.is_read = True
+        mark_read(reminder)
         db.commit();db.refresh(reminder)
         return NotificationRead(
             id=f"profile-{reminder.id}", workspace_id=reminder.workspace_id,
@@ -422,7 +467,7 @@ def mark_notification_read(
             status_code=400,
             detail="Critical task notifications must be acknowledged",
         )
-    notification.is_read = True
+    mark_read(notification)
     db.commit()
     db.refresh(notification)
     return NotificationRead(
@@ -441,7 +486,7 @@ def acknowledge_notification(
 ) -> NotificationRead:
     notification = get_notification(db, notification_id, current_user.id)
     notification.is_acknowledged = True
-    notification.is_read = True
+    mark_read(notification)
     notification.acknowledged_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(notification)
@@ -453,3 +498,23 @@ def acknowledge_notification(
         is_acknowledged=notification.is_acknowledged, is_resolved=notification.is_resolved,
         created_at=notification.created_at, updated_at=notification.updated_at,
     )
+
+
+@router.post("/reminders-shown", status_code=204)
+def record_notification_reminders(
+    payload: NotificationReminderSeen, db: DB, current_user: CurrentUser,
+) -> None:
+    now = datetime.now(timezone.utc)
+    prefixes = (
+        ("announcement-", GlobalAnnouncement), ("global-profile-", GlobalProfileReminder),
+        ("profile-", ProfileCompletionReminder), ("chat-", ChatNotification),
+    )
+    for external_id in payload.notification_ids:
+        model = Notification; raw_id = external_id
+        for prefix, candidate in prefixes:
+            if external_id.startswith(prefix): model, raw_id = candidate, external_id.removeprefix(prefix); break
+        try: numeric_id = int(raw_id)
+        except ValueError: continue
+        item = db.scalar(select(model).where(model.id == numeric_id, model.user_id == current_user.id))
+        if item is not None and reminder_is_due(item, now): item.last_reminded_at = now
+    db.commit()

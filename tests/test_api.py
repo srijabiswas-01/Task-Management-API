@@ -1,8 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from conftest import valid_profile_image
+from app.database import SessionLocal
+from app.models import GlobalAnnouncement
 
 
 def test_frontend_routes_return_the_application(client: TestClient):
@@ -24,6 +26,26 @@ def test_frontend_shell_includes_accessible_responsive_theme_controls(client: Te
     assert 'aria-controls="primary-sidebar"' in response.text
     assert 'aria-expanded="false"' in response.text
     assert 'prefers-color-scheme: dark' in response.text
+
+
+def test_notification_24_hour_reminder_and_read_cleanup(client: TestClient, auth_headers: dict[str, str]):
+    user_id = client.get("/auth/me", headers=auth_headers).json()["id"]
+    old = datetime.now(timezone.utc) - timedelta(hours=25)
+    with SessionLocal() as db:
+        alert = GlobalAnnouncement(user_id=user_id, sent_by_id=user_id, title="Old unread", message="Review this update")
+        db.add(alert); db.flush(); alert.created_at = old; alert.updated_at = old; db.commit(); alert_id = alert.id
+
+    listed = client.get("/notifications", headers=auth_headers).json()["items"]
+    reminder = next(item for item in listed if item["id"] == f"announcement-{alert_id}")
+    assert reminder["reminder_due"] is True
+    assert client.post("/notifications/reminders-shown", json={"notification_ids":[reminder["id"]]}, headers=auth_headers).status_code == 204
+    refreshed = client.get("/notifications", headers=auth_headers).json()["items"]
+    assert next(item for item in refreshed if item["id"] == reminder["id"])["reminder_due"] is False
+
+    assert client.patch(f"/notifications/{reminder['id']}/read", headers=auth_headers).status_code == 200
+    with SessionLocal() as db:
+        alert = db.get(GlobalAnnouncement, alert_id); alert.read_at = old; db.commit()
+    assert all(item["id"] != reminder["id"] for item in client.get("/notifications", headers=auth_headers).json()["items"])
 
 
 def test_register_login_and_me(client: TestClient):

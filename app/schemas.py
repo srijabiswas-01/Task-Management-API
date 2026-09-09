@@ -125,6 +125,7 @@ class NotificationRead(ORMModel):
     is_resolved: bool
     created_at: datetime
     updated_at: datetime
+    reminder_due: bool = False
 
 
 class NotificationList(BaseModel):
@@ -158,6 +159,10 @@ class GlobalAnnouncementSend(BaseModel):
 
 class NotificationReadAllResult(BaseModel):
     marked_count: int
+
+
+class NotificationReminderSeen(BaseModel):
+    notification_ids: list[str] = Field(min_length=1, max_length=50)
 
 
 class ChatUserRead(BaseModel):
