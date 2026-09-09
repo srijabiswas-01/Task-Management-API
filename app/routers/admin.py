@@ -233,6 +233,12 @@ def update_global_user_profile(user_id: int, payload: UserProfileUpdate, db: DB,
             if membership.designation != result.professional_title:
                 membership.designation = result.professional_title
                 changed = True
+        for manager in db.scalars(
+            select(TeamManager).where(TeamManager.user_id == user.id)
+        ).all():
+            if manager.designation != result.professional_title:
+                manager.designation = result.professional_title
+                changed = True
         if changed:
             db.commit()
     return result

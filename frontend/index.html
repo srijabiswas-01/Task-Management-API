@@ -4,6 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#6C4CF1">
+  <script>
+    (() => {
+      const saved = localStorage.getItem("orbit_theme");
+      const theme = saved || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.dataset.theme = theme;
+      document.querySelector('meta[name="theme-color"]').content = theme === "dark" ? "#100d19" : "#6C4CF1";
+    })();
+  </script>
   <title>Orbit Tasks</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -16,10 +24,12 @@
   <link rel="stylesheet" href="/static/member-report.css?v=20260908-member-report-v25">
   <link rel="stylesheet" href="/static/profile-projects.css?v=20260908-profile-projects-v26">
   <link rel="stylesheet" href="/static/chat-compose.css?v=20260902-chat-composer-fix-v3">
-  <link rel="stylesheet" href="/static/responsive-shell.css?v=20260827-responsive-shell">
+  <link rel="stylesheet" href="/static/responsive-shell.css?v=20260909-responsive-audit-v2">
   <link rel="stylesheet" href="/static/chat-scroll.css?v=20260828-chat-scroll">
   <link rel="stylesheet" href="/static/chat-professional.css?v=20260828-chat-persistence">
-  <link rel="stylesheet" href="/static/scrollbars.css?v=20260831-global-scrollbars">
+  <link rel="stylesheet" href="/static/scrollbars.css?v=20260909-unified-scrollbars-v2">
+  <link rel="stylesheet" href="/static/footer.css?v=20260909-professional-policies-v2">
+  <link rel="stylesheet" href="/static/skills-polish.css?v=20260909-skills-reset-v2">
 </head>
 <body>
   <div id="toast" class="toast" aria-live="polite"></div>
@@ -70,7 +80,7 @@
   </section>
 
   <div id="app-shell" class="app-shell hidden">
-    <aside class="sidebar">
+    <aside id="primary-sidebar" class="sidebar">
       <button id="sidebar-close" class="sidebar-close" type="button" aria-label="Close navigation">×</button>
       <div class="brand"><span class="brand-mark">O</span> Orbit</div>
       <div class="workspace-picker">
@@ -108,7 +118,7 @@
 
     <main>
       <header class="topbar">
-        <button id="mobile-menu" class="icon-btn">☰</button>
+        <button id="mobile-menu" class="icon-btn" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="primary-sidebar">☰</button>
         <div><span class="crumb">Workspace</span><strong id="page-title">Overview</strong></div>
         <div class="top-actions">
           <div class="header-account">
@@ -137,6 +147,19 @@
         </div>
       </header>
       <div id="content" class="content"></div>
+      <footer id="app-footer" class="app-footer" aria-label="Application footer">
+        <div class="app-footer-brand"><strong>Orbit</strong><span>Plan, collaborate, and deliver with clarity.</span></div>
+        <nav aria-label="Footer navigation">
+          <a href="/docs" target="_blank" rel="noopener">API documentation</a>
+          <button id="footer-privacy" type="button">Privacy</button>
+          <button id="footer-terms" type="button">Terms</button>
+          <button id="footer-help" type="button">Help &amp; Support</button>
+        </nav>
+        <div class="app-footer-meta">
+          <button id="footer-health" class="footer-health hidden" type="button" aria-label="Open system health details"><i></i><span>Checking</span></button>
+          <span id="footer-version">v0.1.0</span><span>© <span id="footer-year"></span> Orbit</span>
+        </div>
+      </footer>
     </main>
   </div>
 
@@ -147,6 +170,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=20260909-notification-chat-v27"></script>
+  <script src="/static/app.js?v=20260909-audit-hardening-v28"></script>
 </body>
 </html>

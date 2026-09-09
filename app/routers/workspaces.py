@@ -14,7 +14,7 @@ from app.dependencies import (
 from app.core.skills import normalize_skills, parse_skills
 from app.core.profile import profile_completion, validate_profile_image
 from app.core.chat_access import sync_scoped_conversation_access
-from app.models import ChatConversation, ChatParticipant, ChatType, Comment, Department, Designation, GlobalDepartment, GlobalDesignation, Project, Task, TaskAssignee, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceMember, WorkspaceRole
+from app.models import ChatConversation, ChatParticipant, ChatType, Comment, GlobalDepartment, GlobalDesignation, Project, Task, TaskAssignee, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     MemberAdd,
     MemberAccessUpdate,

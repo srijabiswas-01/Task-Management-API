@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import decode_access_token
 from app.database import get_db
-from app.models import Project, Task, TaskAssignee, Team, TeamMember, User, WorkspaceMember, WorkspaceRole
+from app.models import Project, Task, TaskAssignee, Team, TeamMember, User, Workspace, WorkspaceMember, WorkspaceRole
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 DB = Annotated[Session, Depends(get_db)]
@@ -42,6 +42,14 @@ def require_workspace_member(
     workspace_id: int,
     user_id: int,
 ) -> WorkspaceMember:
+    user = db.get(User, user_id)
+    if user and user.is_active and user.is_system_admin:
+        if db.get(Workspace, workspace_id) is None:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        return WorkspaceMember(
+            workspace_id=workspace_id, user_id=user_id,
+            role=WorkspaceRole.admin, is_active=True,
+        )
     membership = db.scalar(
         select(WorkspaceMember).where(
             WorkspaceMember.workspace_id == workspace_id,
@@ -121,5 +129,10 @@ def require_team_admin(db: Session, team_id: int, user_id: int) -> Team:
     team = db.get(Team, team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Team not found")
+    user = db.get(User, user_id)
+    if user and user.is_active and user.is_system_admin:
+        return team
+    if team.workspace_id is None:
+        raise HTTPException(status_code=403, detail="System administrator access required")
     require_workspace_admin(db, team.workspace_id, user_id)
     return team

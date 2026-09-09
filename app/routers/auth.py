@@ -9,7 +9,7 @@ from app.core.security import create_access_token, hash_password, verify_passwor
 from app.core.skills import normalize_skills, parse_skills
 from app.core.profile import profile_completion, validate_profile_image
 from app.dependencies import CurrentUser, DB
-from app.models import GlobalDepartment, GlobalDesignation, Project, Task, TaskAssignee, TeamMember, User, UserProfile
+from app.models import Project, Task, TaskAssignee, TeamMember, User, UserProfile
 from app.schemas import Token, UserProfileRead, UserProfileUpdate, UserRead, UserRegister
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])

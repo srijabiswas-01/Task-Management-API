@@ -1,11 +1,12 @@
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     app_name: str = "Task Management API"
+    environment: str = "development"
     database_url: str = "sqlite:///./task_management.db"
     jwt_secret_key: str = Field(
         default="development-only-change-me",
@@ -38,6 +39,12 @@ class Settings(BaseSettings):
         if value.startswith("postgresql://"):
             return value.replace("postgresql://", "postgresql+psycopg://", 1)
         return value
+
+    @model_validator(mode="after")
+    def reject_development_secret_in_production(self):
+        if self.environment.casefold() in {"production", "prod"} and self.jwt_secret_key == "development-only-change-me":
+            raise ValueError("JWT_SECRET_KEY must be configured for production")
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",

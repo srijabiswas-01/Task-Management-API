@@ -6,10 +6,24 @@ from conftest import valid_profile_image
 
 
 def test_frontend_routes_return_the_application(client: TestClient):
-    for path in ("/app/overview", "/app/projects", "/app/board", "/app/gantt"):
+    for path in (
+        "/app/overview", "/app/projects", "/app/board", "/app/gantt",
+        "/app/report", "/app/people", "/app/profile", "/app/skills",
+        "/app/team-member-analytics", "/app/users", "/app/notifications",
+        "/app/messages",
+    ):
         response = client.get(path)
         assert response.status_code == 200
         assert "Orbit Tasks" in response.text
+
+
+def test_frontend_shell_includes_accessible_responsive_theme_controls(client: TestClient):
+    response = client.get("/app/overview")
+    assert 'name="viewport"' in response.text
+    assert 'id="primary-sidebar"' in response.text
+    assert 'aria-controls="primary-sidebar"' in response.text
+    assert 'aria-expanded="false"' in response.text
+    assert 'prefers-color-scheme: dark' in response.text
 
 
 def test_register_login_and_me(client: TestClient):
@@ -194,11 +208,19 @@ def test_legacy_location_and_years_do_not_complete_structured_profile(
         headers=auth_headers,
     )
     assert response.status_code == 200
+
+
     profile = response.json()
     assert profile["completion_percent"] < 100
     assert {"City", "State", "Country", "Experience start date"}.issubset(
         profile["missing_fields"]
     )
+
+
+def test_health_checks_database_connectivity(client: TestClient):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "database": "connected", "version": "0.1.0"}
 
 
 def test_registration_requires_admin_approval(client: TestClient, auth_headers: dict[str, str]):
@@ -864,6 +886,7 @@ def test_assigned_member_gets_persistent_critical_deadline_notification(
         headers=auth_headers,
     )
 
+    assert client.post("/notifications/sync-deadlines", headers=auth_headers).status_code == 204
     notifications = client.get("/notifications", headers=auth_headers)
     assert notifications.status_code == 200
     body = notifications.json()

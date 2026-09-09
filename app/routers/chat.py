@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.dependencies import CurrentUser, DB

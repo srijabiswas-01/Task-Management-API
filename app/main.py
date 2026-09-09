@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
+from collections import defaultdict, deque
 import logging
 from pathlib import Path
-from time import perf_counter
+from time import monotonic, perf_counter
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,10 +19,16 @@ from app.models import Department, Designation, GlobalDepartment, GlobalDesignat
 from app.routers import admin, ai, auth, boards, chat, notifications, projects, tasks, workspaces
 
 logger = logging.getLogger(__name__)
+request_buckets: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if settings.environment.casefold() in {"production", "prod"}:
+        # Production schemas are managed exclusively by Alembic. Application
+        # workers must never race each other while executing DDL.
+        yield
+        return
     # Alembic is preferred in production. This keeps local setup friction-free.
     Base.metadata.create_all(bind=engine)
     # create_all does not add columns to an existing local database. Keep this
@@ -195,6 +202,27 @@ app.add_middleware(
 
 
 @app.middleware("http")
+async def rate_limit_sensitive_routes(request, call_next):
+    path = request.url.path
+    category = "auth" if path in {"/auth/login", "/auth/register"} else "ai" if "/ai/" in path else None
+    if category:
+        limit = 120 if category == "auth" else 30
+        now = monotonic()
+        key = (request.client.host if request.client else "unknown", category)
+        bucket = request_buckets[key]
+        while bucket and now - bucket[0] >= 60:
+            bucket.popleft()
+        if len(bucket) >= limit:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Please try again shortly."},
+                headers={"Retry-After": "60"},
+            )
+        bucket.append(now)
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def add_request_timing(request, call_next):
     started = perf_counter()
     response = await call_next(request)
@@ -262,4 +290,7 @@ def frontend_route(frontend_path: str) -> FileResponse:
 
 @app.get("/health", tags=["System"])
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    # Use an independent short-lived session so health means both API and DB.
+    with Session(engine) as health_db:
+        health_db.execute(text("SELECT 1"))
+    return {"status": "ok", "database": "connected", "version": app.version}

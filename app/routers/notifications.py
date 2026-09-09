@@ -112,10 +112,10 @@ def list_notifications(
     db: DB,
     current_user: CurrentUser,
     limit: int = Query(default=50, ge=1, le=100),
-    sync_tasks: bool = Query(default=True),
+    sync_tasks: bool = Query(default=False, deprecated=True),
 ) -> NotificationList:
-    if sync_tasks:
-        sync_deadline_notifications(db, current_user.id)
+    # Retained as a no-op query parameter for older clients. GET is read-only;
+    # deadline synchronization is explicitly triggered through POST below.
     active_filter = (
         Notification.user_id == current_user.id,
         Notification.is_resolved.is_(False),
@@ -130,18 +130,22 @@ def list_notifications(
         select(ProfileCompletionReminder)
         .where(ProfileCompletionReminder.user_id == current_user.id)
         .order_by(ProfileCompletionReminder.updated_at.desc())
+        .limit(limit)
     ).all())
     global_reminders = list(db.scalars(
         select(GlobalProfileReminder).where(GlobalProfileReminder.user_id == current_user.id)
         .order_by(GlobalProfileReminder.updated_at.desc())
+        .limit(limit)
     ).all())
     announcements = list(db.scalars(
         select(GlobalAnnouncement).where(GlobalAnnouncement.user_id == current_user.id)
         .order_by(GlobalAnnouncement.updated_at.desc())
+        .limit(limit)
     ).all())
     chat_notifications = list(db.scalars(
         select(ChatNotification).where(ChatNotification.user_id == current_user.id)
         .order_by(ChatNotification.updated_at.desc())
+        .limit(limit)
     ).all())
     announcement_keys = {
         (item.sent_by_id, item.title, item.message) for item in announcements if not item.is_read
@@ -150,13 +154,6 @@ def list_notifications(
         item for item in chat_notifications
         if (item.sender_id, item.title, item.message) not in announcement_keys
     ]
-    _, current_missing = profile_completion(current_user, current_user.profile)
-    if not [field for field in current_missing if field not in {"Department", "Designation"}]:
-        for reminder in reminders:
-            reminder.is_resolved = True
-        for reminder in global_reminders:
-            reminder.is_resolved = True
-        db.commit()
     unread_count = db.scalar(
         select(func.count(Notification.id)).where(*active_filter, Notification.is_read.is_(False))
     ) or 0
@@ -207,6 +204,22 @@ def list_notifications(
         unread_count=unread_count + reminder_unread + announcement_unread + chat_unread,
         critical_count=critical_count,
     )
+
+
+@router.post("/sync-deadlines", status_code=204)
+def refresh_deadline_notifications(db: DB, current_user: CurrentUser) -> None:
+    sync_deadline_notifications(db, current_user.id)
+    _, current_missing = profile_completion(current_user, current_user.profile)
+    if not [field for field in current_missing if field not in {"Department", "Designation"}]:
+        db.query(ProfileCompletionReminder).filter(
+            ProfileCompletionReminder.user_id == current_user.id,
+            ProfileCompletionReminder.is_resolved.is_(False),
+        ).update({"is_resolved": True}, synchronize_session=False)
+        db.query(GlobalProfileReminder).filter(
+            GlobalProfileReminder.user_id == current_user.id,
+            GlobalProfileReminder.is_resolved.is_(False),
+        ).update({"is_resolved": True}, synchronize_session=False)
+        db.commit()
 
 
 @router.post("/profile-completion", response_model=ProfileReminderResult)

@@ -369,7 +369,9 @@ def list_tasks(
     if status is not None:
         query = query.where(Task.status == status)
     if assignee_id is not None:
-        query = query.where(Task.assignee_id == assignee_id)
+        query = query.where(Task.id.in_(
+            select(TaskAssignee.task_id).where(TaskAssignee.user_id == assignee_id)
+        ))
     if sprint_id is not None:
         query = query.where(Task.sprint_id == sprint_id)
     return list(db.scalars(query.order_by(Task.created_at.desc()).limit(limit)).all())

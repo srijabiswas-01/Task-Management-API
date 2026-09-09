@@ -1,4 +1,10 @@
 import json
+import sys
+from pathlib import Path
+
+# Allow this script to be executed directly from the repository root without
+# requiring callers to modify PYTHONPATH or install the application package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import inspect, text
 
@@ -19,7 +25,7 @@ CHECKS = {
     "duplicate_notifications": "SELECT count(*) FROM (SELECT message_id,user_id FROM chat_notifications GROUP BY message_id,user_id HAVING count(*)>1) duplicates",
     "invalid_project_conversations": "SELECT count(*) FROM chat_conversations WHERE chat_type='project' AND project_id IS NULL",
     "invalid_team_conversations": "SELECT count(*) FROM chat_conversations WHERE chat_type='team' AND team_id IS NULL",
-    "future_revocations": "SELECT count(*) FROM chat_participants WHERE access_revoked_at > now()",
+    "future_revocations": "SELECT count(*) FROM chat_participants WHERE access_revoked_at > CURRENT_TIMESTAMP",
 }
 
 TABLES = (
@@ -32,8 +38,12 @@ TABLES = (
 def main() -> None:
     inspector = inspect(engine)
     with engine.connect() as connection:
+        database_name = (
+            connection.scalar(text("select current_database()"))
+            if engine.dialect.name == "postgresql" else str(engine.url.database)
+        )
         result = {
-            "database": connection.scalar(text("select current_database()")),
+            "database": database_name,
             "dialect": engine.dialect.name,
             "checks": {name: connection.scalar(text(statement)) for name, statement in CHECKS.items()},
             "counts": {table: connection.scalar(text(f'SELECT count(*) FROM "{table}"')) for table in TABLES},

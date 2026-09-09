@@ -3,7 +3,7 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.dependencies import CurrentUser, DB, require_project_admin
-from app.models import ChecklistAction, ChecklistItem, GlobalTeamMember, Task, TaskAssignee, TaskStatus, Team, TeamMember
+from app.models import ChecklistAction, ChecklistItem, GlobalTeamMember, Task, TaskStatus, Team, TeamMember
 from app.routers.projects import accessible_project
 from app.routers.tasks import set_task_assignments, set_task_assignees, set_task_schedule, sync_board_column_to_status, working_days
 from app.schemas import (
