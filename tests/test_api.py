@@ -43,6 +43,15 @@ def test_register_login_and_me(client: TestClient):
     analytics = client.get("/admin/team-member-analytics", headers=admin_headers)
     assert analytics.status_code == 200
     assert {"members", "teams", "projects"}.issubset(analytics.json())
+    own_report = client.get("/members/me/report", headers=admin_headers)
+    assert own_report.status_code == 200
+    assert own_report.json()["member"]["email"] == "jane@example.com"
+    assert own_report.json()["financials_visible"] is False
+    admin_report = client.get(
+        f"/admin/members/{me.json()['id']}/report", headers=admin_headers
+    )
+    assert admin_report.status_code == 200
+    assert admin_report.json()["financials_visible"] is True
 
 
 def test_global_skill_catalog_rename_and_delete_sync_profiles(
@@ -901,6 +910,16 @@ def test_chat_admin_broadcast_and_direct_message_permissions(
         f"/workspaces/{workspace['id']}/chat/conversations/{announcement_id}/messages",
         json={"body": "Welcome to the workspace"}, headers=auth_headers,
     ).status_code == 201
+    notification_feed = client.get(
+        "/notifications?sync_tasks=false", headers=member_headers
+    ).json()
+    chat_notice = next(
+        item for item in notification_feed["items"]
+        if item["kind"] == "chat_message"
+    )
+    assert chat_notice["conversation_id"] == announcement_id
+    assert chat_notice["workspace_id"] == workspace["id"]
+    assert notification_feed["unread_count"] == 1
     member_conversations = client.get(
         f"/workspaces/{workspace['id']}/chat/conversations", headers=member_headers
     )
@@ -1439,6 +1458,15 @@ def test_current_user_profile_and_project_history(
         headers=auth_headers,
     ).json()
     assert project["project_manager_id"] is not None
+    profile_projects = client.get("/auth/profile/projects", headers=auth_headers)
+    assert profile_projects.status_code == 200
+    assert profile_projects.json()[0]["name"] == "Profile project"
+    project_detail = client.get(
+        f"/auth/profile/projects/{project['id']}", headers=auth_headers
+    )
+    assert project_detail.status_code == 200
+    assert project_detail.json()["is_manager"] is True
+    assert project_detail.json()["tasks"] == []
     department = client.post(
         f"/workspaces/{workspace_id}/departments",
         json={"name": "Engineering", "description": "Builds the product"},
@@ -1693,6 +1721,7 @@ def test_global_reminders_and_announcements_work_without_workspace(
     items = client.get("/notifications", headers=member_headers).json()["items"]
     assert any(item["id"].startswith("global-profile-") for item in items)
     global_announcement = next(item for item in items if item["id"].startswith("announcement-"))
+    assert sum(item["title"] == "Company update" for item in items) == 1
     assert global_announcement["workspace_id"] is None
     assert client.patch(
         f"/notifications/{global_announcement['id']}/read", headers=member_headers

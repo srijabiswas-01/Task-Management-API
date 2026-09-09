@@ -139,6 +139,17 @@ def list_notifications(
         select(GlobalAnnouncement).where(GlobalAnnouncement.user_id == current_user.id)
         .order_by(GlobalAnnouncement.updated_at.desc())
     ).all())
+    chat_notifications = list(db.scalars(
+        select(ChatNotification).where(ChatNotification.user_id == current_user.id)
+        .order_by(ChatNotification.updated_at.desc())
+    ).all())
+    announcement_keys = {
+        (item.sent_by_id, item.title, item.message) for item in announcements if not item.is_read
+    }
+    visible_chat_notifications = [
+        item for item in chat_notifications
+        if (item.sender_id, item.title, item.message) not in announcement_keys
+    ]
     _, current_missing = profile_completion(current_user, current_user.profile)
     if not [field for field in current_missing if field not in {"Department", "Designation"}]:
         for reminder in reminders:
@@ -180,12 +191,20 @@ def list_notifications(
         is_acknowledged=False, is_resolved=False,
         created_at=item.created_at, updated_at=item.updated_at,
     ) for item in announcements)
+    serialized.extend(NotificationRead(
+        id=f"chat-{item.id}", workspace_id=item.workspace_id,
+        conversation_id=item.conversation_id, kind="chat_message", severity="normal",
+        title=item.title, message=item.message, is_read=item.is_read,
+        is_acknowledged=False, is_resolved=False,
+        created_at=item.created_at, updated_at=item.updated_at,
+    ) for item in visible_chat_notifications)
     serialized.sort(key=lambda item: (item.is_resolved, -item.updated_at.timestamp()))
     reminder_unread = sum(1 for item in [*reminders, *global_reminders] if not item.is_resolved and not item.is_read)
     announcement_unread = sum(1 for item in announcements if not item.is_read)
+    chat_unread = sum(1 for item in visible_chat_notifications if not item.is_read)
     return NotificationList(
         items=serialized[:limit],
-        unread_count=unread_count + reminder_unread + announcement_unread,
+        unread_count=unread_count + reminder_unread + announcement_unread + chat_unread,
         critical_count=critical_count,
     )
 
@@ -313,11 +332,14 @@ def mark_all_normal_notifications_read(
     announcements = list(db.scalars(select(GlobalAnnouncement).where(
         GlobalAnnouncement.user_id == current_user.id, GlobalAnnouncement.is_read.is_(False)
     )).all())
-    for notification in [*normal_notifications, *profile_reminders, *global_profile_reminders, *announcements]:
+    chat_notifications = list(db.scalars(select(ChatNotification).where(
+        ChatNotification.user_id == current_user.id, ChatNotification.is_read.is_(False)
+    )).all())
+    for notification in [*normal_notifications, *profile_reminders, *global_profile_reminders, *announcements, *chat_notifications]:
         notification.is_read = True
     db.commit()
     return NotificationReadAllResult(
-        marked_count=len(normal_notifications) + len(profile_reminders) + len(global_profile_reminders) + len(announcements)
+        marked_count=len(normal_notifications) + len(profile_reminders) + len(global_profile_reminders) + len(announcements) + len(chat_notifications)
     )
 
 

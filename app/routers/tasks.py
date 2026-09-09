@@ -29,6 +29,7 @@ from app.models import (
 )
 from app.core.profile import profile_completion
 from app.core.skills import parse_skills
+from app.core.member_report import build_member_report
 from app.routers.projects import accessible_project
 from app.schemas import (
     ChecklistItemCreate,
@@ -46,6 +47,11 @@ from app.schemas import (
 )
 
 router = APIRouter(tags=["Tasks"])
+
+
+@router.get("/members/me/report")
+def my_member_report(db: DB, current_user: CurrentUser) -> dict:
+    return build_member_report(db, current_user.id, include_financials=False)
 
 
 def set_task_assignees(

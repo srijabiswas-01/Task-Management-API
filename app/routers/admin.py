@@ -7,11 +7,18 @@ from sqlalchemy.orm import selectinload
 from app.core.profile import profile_completion
 from app.core.chat_access import sync_scoped_conversation_access
 from app.core.skills import parse_skills
+from app.core.member_report import build_member_report
 from app.dependencies import CurrentUser, DB
 from app.models import ChatConversation, ChatMessage, ChatNotification, ChatParticipant, ChatType, Comment, GlobalAnnouncement, GlobalDepartment, GlobalDesignation, GlobalSkill, GlobalTeamMember, OrganizationHoliday, Project, Task, TaskAssignee, TaskStatus, Team, TeamManager, TeamMember, User, UserProfile, Workspace, WorkspaceRole
 from app.schemas import DepartmentCreate, DepartmentRead, DepartmentUpdate, DesignationCreate, DesignationRead, DesignationUpdate, GlobalAnnouncementSend, GlobalMemberAssign, GlobalSkillCreate, GlobalSkillRead, GlobalSkillUpdate, GlobalTeamMemberAdd, GlobalTeamMemberRead, HolidayCreate, HolidayRead, ProfileReminderResult, SkillMemberRead, TeamCreate, TeamMemberRead, TeamRead, TeamUpdate, UserDirectoryRead, UserProfileRead, UserProfileUpdate
 
 router = APIRouter(prefix="/admin", tags=["System administration"])
+
+
+@router.get("/members/{member_id}/report")
+def admin_member_report(member_id: int, db: DB, current_user: CurrentUser) -> dict:
+    require_system_admin(current_user)
+    return build_member_report(db, member_id, include_financials=True)
 
 
 def require_system_admin(current_user: CurrentUser) -> None:

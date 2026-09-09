@@ -694,8 +694,15 @@ def admin_profile_response(db: DB, user: User) -> UserProfileRead:
         select(Project.name).join(TeamMember, TeamMember.project_id == Project.id)
         .where(TeamMember.user_id == user.id).distinct()
     ).all()
+    task_allocated = db.scalars(
+        select(Project.name)
+        .join(Task, Task.project_id == Project.id)
+        .join(TaskAssignee, TaskAssignee.task_id == Task.id)
+        .where(TaskAssignee.user_id == user.id)
+        .distinct()
+    ).all()
     managed = db.scalars(select(Project.name).where(Project.project_manager_id == user.id)).all()
-    projects = sorted(set(allocated) | set(managed))
+    projects = sorted(set(allocated) | set(task_allocated) | set(managed))
     completion_percent, missing_fields = profile_completion(user, profile)
     return UserProfileRead(
         name=user.name, email=user.email, project_count=len(projects), projects=projects,

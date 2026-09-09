@@ -3,12 +3,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, select, text
+from sqlalchemy.orm import selectinload
 
 from app.core.security import create_access_token, hash_password, verify_password
 from app.core.skills import normalize_skills, parse_skills
 from app.core.profile import profile_completion, validate_profile_image
 from app.dependencies import CurrentUser, DB
-from app.models import GlobalDepartment, GlobalDesignation, Project, TeamMember, User, UserProfile
+from app.models import GlobalDepartment, GlobalDesignation, Project, Task, TaskAssignee, TeamMember, User, UserProfile
 from app.schemas import Token, UserProfileRead, UserProfileUpdate, UserRead, UserRegister
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -96,10 +97,17 @@ def profile_response(db: DB, user: User) -> UserProfileRead:
         select(Project.name).join(TeamMember, TeamMember.project_id == Project.id)
         .where(TeamMember.user_id == user.id).distinct()
     ).all()
+    task_allocated = db.scalars(
+        select(Project.name)
+        .join(Task, Task.project_id == Project.id)
+        .join(TaskAssignee, TaskAssignee.task_id == Task.id)
+        .where(TaskAssignee.user_id == user.id)
+        .distinct()
+    ).all()
     managed = db.scalars(
         select(Project.name).where(Project.project_manager_id == user.id)
     ).all()
-    projects = sorted(set(allocated) | set(managed))
+    projects = sorted(set(allocated) | set(task_allocated) | set(managed))
     completion_percent, missing_fields = profile_completion(user, profile)
     return UserProfileRead(
         name=user.name, email=user.email, project_count=len(projects), projects=projects,
@@ -118,6 +126,61 @@ def profile_response(db: DB, user: User) -> UserProfileRead:
         achievements=profile.achievements if profile else None,
         completion_percent=completion_percent, missing_fields=missing_fields,
     )
+
+
+def profile_project_ids(db: DB, user_id: int) -> set[int]:
+    legacy = db.scalars(select(TeamMember.project_id).where(TeamMember.user_id == user_id)).all()
+    assigned = db.scalars(
+        select(Task.project_id).join(TaskAssignee, TaskAssignee.task_id == Task.id)
+        .where(TaskAssignee.user_id == user_id).distinct()
+    ).all()
+    managed = db.scalars(select(Project.id).where(Project.project_manager_id == user_id)).all()
+    return set(legacy) | set(assigned) | set(managed)
+
+
+@router.get("/profile/projects")
+def get_profile_projects(db: DB, current_user: CurrentUser) -> list[dict]:
+    project_ids = profile_project_ids(db, current_user.id)
+    if not project_ids:
+        return []
+    projects = db.scalars(
+        select(Project).where(Project.id.in_(project_ids)).order_by(Project.name, Project.id)
+    ).all()
+    return [{"id": project.id, "name": project.name,
+             "start_date": project.start_date, "end_date": project.end_date,
+             "status": project.status.value,
+             "is_manager": project.project_manager_id == current_user.id}
+            for project in projects]
+
+
+@router.get("/profile/projects/{project_id}")
+def get_profile_project_detail(project_id: int, db: DB, current_user: CurrentUser) -> dict:
+    if project_id not in profile_project_ids(db, current_user.id):
+        raise HTTPException(status_code=404, detail="Project is not connected to your profile")
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    rows = db.execute(
+        select(Task, TaskAssignee)
+        .join(TaskAssignee, TaskAssignee.task_id == Task.id)
+        .where(Task.project_id == project.id, TaskAssignee.user_id == current_user.id)
+        .options(selectinload(Task.checklist_items))
+        .order_by(Task.due_date, Task.id)
+    ).all()
+    tasks = [{"id": task.id, "title": task.title, "description": task.description,
+              "responsibility": assignment.responsibility,
+              "start_date": task.start_date, "due_date": task.due_date,
+              "status": task.status.value, "priority": task.priority.value,
+              "progress": task.progress, "planned_hours": assignment.planned_hours or 0,
+              "checklist_total": len(task.checklist_items),
+              "checklist_done": sum(item.is_done for item in task.checklist_items)}
+             for task, assignment in rows]
+    return {"id": project.id, "name": project.name,
+            "start_date": project.start_date, "end_date": project.end_date,
+            "status": project.status.value,
+            "is_manager": project.project_manager_id == current_user.id,
+            "average_progress": round(sum(item["progress"] for item in tasks) / len(tasks)) if tasks else 0,
+            "tasks": tasks}
 
 
 @router.get("/profile", response_model=UserProfileRead)

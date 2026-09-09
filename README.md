@@ -64,6 +64,10 @@ The included responsive frontend provides:
 - Global Messages with Admin direct messaging, project chats, team chats, announcements,
   unread tracking, persistent replies, and clickable reply references
 - Global Notifications, profile reminders, and custom announcements
+- Unified notification history for task deadlines, profile reminders,
+  announcements, and unread chat messages
+- Expandable Profile project history with personal tasks, responsibilities, dates,
+  progress, effort, and checklist completion
 - Admin-only Users, People & Teams, Skills, and Team & Member Analytics pages
 
 After signing in, an Admin can approve accounts, assign Admin or Member access,
@@ -120,6 +124,21 @@ skill, eligibility, and free-text search. Teams and members open in right-side d
 panels. **Download complete report** exports all filtered dashboard sections and
 records to one PDF, regardless of on-screen pagination.
 
+### Member performance report
+
+Admins and Members can open **My report** from the account menu. The right-side
+report panel provides two views without requiring a selected workspace:
+
+- **My progress** shows personal delivery KPIs, task and checklist progress,
+  workload against weekly capacity, status distribution, risks, and task details.
+- **Project performance** lists only projects in which the signed-in member has
+  an assigned task, then shows that member's contribution, hours, progress,
+  checklist completion, and assigned tasks for the selected project.
+
+Admins can open the same detailed report for a selected person from Team & Member
+Analytics. Member-facing reports do not expose financial rates or cost figures.
+The PDF download combines the personal summary and every allocated-project section.
+
 ## Project reports and exports
 
 Project Report provides interactive filters, detailed delivery tables, resource
@@ -166,6 +185,7 @@ Authorization: Bearer <access_token>
 ## Main endpoints
 
 - `POST /auth/register`, `POST /auth/login`, `GET /auth/me`
+- `GET /auth/profile/projects`, `GET /auth/profile/projects/{id}`
 - `GET|POST /workspaces`
 - `GET|POST /workspaces/{id}/members`
 - `GET|POST /workspaces/{id}/teams`
@@ -186,6 +206,7 @@ Authorization: Bearer <access_token>
 - `GET|POST /admin/skill-catalog-items`
 - `PATCH|DELETE /admin/skill-catalog-items/{id}`
 - `GET /admin/team-member-analytics`
+- `GET /members/me/report`, `GET /admin/members/{id}/report`
 - `GET /chat/conversations`, `POST /chat/conversations`
 - `GET /notifications`
 
