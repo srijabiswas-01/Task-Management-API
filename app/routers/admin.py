@@ -49,11 +49,14 @@ def delete_holiday(holiday_id: int, db: DB, current_user: CurrentUser) -> None:
     db.delete(item); db.commit()
 
 
-def global_users(db: DB) -> list[User]:
+def global_users(db: DB, newest_first: bool = False) -> list[User]:
+    ordering = (
+        (User.created_at.desc(), User.id.desc())
+        if newest_first else
+        (User.is_active.desc(), User.name, User.email)
+    )
     return list(db.scalars(
-        select(User).options(selectinload(User.profile)).order_by(
-            User.is_active.desc(), User.name, User.email
-        )
+        select(User).options(selectinload(User.profile)).order_by(*ordering)
     ).all())
 
 
@@ -89,7 +92,7 @@ def list_global_users(db: DB, current_user: CurrentUser) -> list[UserDirectoryRe
     for user_id, project_name in task_assignment_rows:
         projects.setdefault(user_id, []).append(project_name)
     result: list[UserDirectoryRead] = []
-    for user in global_users(db):
+    for user in global_users(db, newest_first=True):
         percent, missing = profile_completion(user, user.profile)
         result.append(UserDirectoryRead(
             user_id=user.id, name=user.name, email=user.email,

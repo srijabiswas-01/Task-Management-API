@@ -54,6 +54,23 @@ def test_register_login_and_me(client: TestClient):
     assert admin_report.json()["financials_visible"] is True
 
 
+def test_users_directory_lists_latest_registration_first(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    first = client.post(
+        "/auth/register",
+        json={"name": "Earlier User", "email": "earlier@example.com", "password": "securepass123"},
+    ).json()
+    latest = client.post(
+        "/auth/register",
+        json={"name": "Latest User", "email": "latest@example.com", "password": "securepass123"},
+    ).json()
+    users = client.get("/admin/users", headers=auth_headers)
+    assert users.status_code == 200
+    assert users.json()[0]["user_id"] == latest["id"]
+    assert users.json()[1]["user_id"] == first["id"]
+
+
 def test_global_skill_catalog_rename_and_delete_sync_profiles(
     client: TestClient, auth_headers: dict[str, str]
 ):
