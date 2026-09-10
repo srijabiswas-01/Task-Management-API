@@ -129,9 +129,12 @@ class NotificationRead(ORMModel):
 
 
 class NotificationList(BaseModel):
+    """Combined notification feed and badge counters for one user."""
+
     items: list[NotificationRead]
     unread_count: int
     critical_count: int
+    chat_unread_count: int = 0
 
 
 class ProfileReminderSend(BaseModel):

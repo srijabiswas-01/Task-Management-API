@@ -27,7 +27,7 @@ async def notification_cleanup_loop() -> None:
     while True:
         try:
             with SessionLocal() as db:
-                notifications.cleanup_expired_notifications(db)
+                notifications.cleanup_expired_notifications(db, force=True)
         except Exception:
             logger.exception("Notification retention cleanup failed")
         await asyncio.sleep(3600)

@@ -388,7 +388,6 @@ async function boot() {
     $("#admin-people-nav").classList.toggle("hidden",!isAdmin());
     $("#admin-analytics-nav").classList.toggle("hidden",!isAdmin());
     loadNotifications().catch(err=>console.warn("Notification preload failed",err));
-    loadChatUnreadCount().catch(err=>console.warn("Message badge preload failed",err));
     startNotificationPolling();
     $("#boot-screen").classList.add("hidden");
     if(state.view==="profile") {
@@ -439,7 +438,15 @@ async function loadNotifications(renderPage=false){
   const fullList=renderPage||state.view==="notifications";
   if(fullList)await api("/notifications/sync-deadlines",{method:"POST"});
   const data=await api(`/notifications?limit=${fullList?50:8}`);
-  state.notifications=data.items;state.notificationUnread=data.unread_count;state.notificationCritical=data.critical_count;
+  state.notifications=data.items;
+  state.notificationUnread=data.unread_count;
+  state.notificationCritical=data.critical_count;
+  state.chatUnread=Number(data.chat_unread_count||0);
+  const chatBadge=$("#sidebar-chat-count");
+  if(chatBadge){
+    chatBadge.textContent=state.chatUnread>99?"99+":state.chatUnread;
+    chatBadge.classList.toggle("hidden",!state.chatUnread);
+  }
   renderNotificationHeader();
   showNotificationReminder(data.items);
   if(renderPage&&state.view==="notifications")render();
@@ -473,14 +480,11 @@ function renderNotificationHeader(){
     catch(err){button.disabled=false;button.textContent="Mark all read";toast(err.message,true)}
   });
 }
-async function loadChatUnreadCount(){
-  if(state.view==="chat")return loadChats(true);
-  const result=await api("/chat/unread-count");state.chatUnread=Number(result.unread_count||0);
-  const badge=$("#sidebar-chat-count");if(badge){badge.textContent=state.chatUnread>99?"99+":state.chatUnread;badge.classList.toggle("hidden",!state.chatUnread)}
-  renderNotificationHeader();
-}
 async function pollUpdates(){
-  await Promise.all([loadNotifications(state.view==="notifications"),state.view==="chat"?loadChats(true):loadChatUnreadCount()]);
+  // The notification payload owns all badge counters. Chat content is fetched
+  // separately only while the Messages page is active.
+  if(state.view==="chat")await Promise.all([loadNotifications(false),loadChats(true)]);
+  else await loadNotifications(state.view==="notifications");
 }
 function startNotificationPolling(){
   clearTimeout(startNotificationPolling.timer);

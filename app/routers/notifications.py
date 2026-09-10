@@ -1,4 +1,6 @@
 from datetime import datetime, time, timedelta, timezone
+from threading import Lock
+from time import monotonic
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import delete, func, select
@@ -21,9 +23,23 @@ router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
 NOTIFICATION_MODELS = (Notification, ProfileCompletionReminder, GlobalProfileReminder, GlobalAnnouncement, ChatNotification)
 RETENTION_PERIOD = timedelta(hours=24)
+_cleanup_lock = Lock()
+_last_cleanup_at = 0.0
+_CLEANUP_INTERVAL_SECONDS = 15 * 60
 
 
-def cleanup_expired_notifications(db: DB) -> int:
+def cleanup_expired_notifications(db: DB, *, force: bool = False) -> int:
+    """Delete expired read notifications in batches at a controlled cadence.
+
+    The hourly background job passes ``force=True``. Request-time calls are
+    throttled process-wide so frequent header polling stays inexpensive.
+    """
+    global _last_cleanup_at
+    current_tick = monotonic()
+    with _cleanup_lock:
+        if not force and current_tick - _last_cleanup_at < _CLEANUP_INTERVAL_SECONDS:
+            return 0
+        _last_cleanup_at = current_tick
     cutoff = datetime.now(timezone.utc) - RETENTION_PERIOD
     removed = 0
     for model in NOTIFICATION_MODELS:
@@ -244,6 +260,7 @@ def list_notifications(
         items=serialized[:limit],
         unread_count=unread_count + reminder_unread + announcement_unread + chat_unread,
         critical_count=critical_count,
+        chat_unread_count=chat_unread,
     )
 
 

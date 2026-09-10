@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from conftest import valid_profile_image
 from app.database import SessionLocal
 from app.models import GlobalAnnouncement
+from app.routers.notifications import cleanup_expired_notifications
 
 
 def test_frontend_routes_return_the_application(client: TestClient):
@@ -45,6 +46,7 @@ def test_notification_24_hour_reminder_and_read_cleanup(client: TestClient, auth
     assert client.patch(f"/notifications/{reminder['id']}/read", headers=auth_headers).status_code == 200
     with SessionLocal() as db:
         alert = db.get(GlobalAnnouncement, alert_id); alert.read_at = old; db.commit()
+        cleanup_expired_notifications(db, force=True)
     assert all(item["id"] != reminder["id"] for item in client.get("/notifications", headers=auth_headers).json()["items"])
 
 
