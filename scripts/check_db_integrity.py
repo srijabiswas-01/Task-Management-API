@@ -12,6 +12,17 @@ from app.database import engine
 
 
 CHECKS = {
+    "users_without_organization": "SELECT count(*) FROM users WHERE organization_id IS NULL",
+    "workspaces_without_organization": "SELECT count(*) FROM workspaces WHERE organization_id IS NULL",
+    "teams_without_organization": "SELECT count(*) FROM teams WHERE organization_id IS NULL",
+    "chats_without_organization": "SELECT count(*) FROM chat_conversations WHERE organization_id IS NULL",
+    "workspace_owner_tenant_mismatch": "SELECT count(*) FROM workspaces w JOIN users u ON u.id=w.owner_id WHERE w.organization_id<>u.organization_id",
+    "workspace_member_tenant_mismatch": "SELECT count(*) FROM workspace_members wm JOIN workspaces w ON w.id=wm.workspace_id JOIN users u ON u.id=wm.user_id WHERE w.organization_id<>u.organization_id",
+    "team_workspace_tenant_mismatch": "SELECT count(*) FROM teams t JOIN workspaces w ON w.id=t.workspace_id WHERE t.organization_id<>w.organization_id",
+    "global_team_member_tenant_mismatch": "SELECT count(*) FROM global_team_members gm JOIN teams t ON t.id=gm.team_id JOIN users u ON u.id=gm.user_id WHERE t.organization_id<>u.organization_id",
+    "chat_workspace_tenant_mismatch": "SELECT count(*) FROM chat_conversations c JOIN workspaces w ON w.id=c.workspace_id WHERE c.organization_id<>w.organization_id",
+    "chat_creator_tenant_mismatch": "SELECT count(*) FROM chat_conversations c JOIN users u ON u.id=c.created_by_id WHERE c.organization_id<>u.organization_id",
+    "task_assignee_tenant_mismatch": "SELECT count(*) FROM task_assignees a JOIN users u ON u.id=a.user_id JOIN tasks t ON t.id=a.task_id JOIN projects p ON p.id=t.project_id JOIN workspaces w ON w.id=p.workspace_id WHERE u.organization_id<>w.organization_id",
     "orphan_chat_participant_conversation": "SELECT count(*) FROM chat_participants p LEFT JOIN chat_conversations c ON c.id=p.conversation_id WHERE c.id IS NULL",
     "orphan_chat_participant_user": "SELECT count(*) FROM chat_participants p LEFT JOIN users u ON u.id=p.user_id WHERE u.id IS NULL",
     "orphan_chat_message_conversation": "SELECT count(*) FROM chat_messages m LEFT JOIN chat_conversations c ON c.id=m.conversation_id WHERE c.id IS NULL",
@@ -29,7 +40,7 @@ CHECKS = {
 }
 
 TABLES = (
-    "users", "workspaces", "projects", "teams", "team_members",
+    "organizations", "users", "workspaces", "projects", "teams", "team_members",
     "global_team_members", "chat_conversations", "chat_participants",
     "chat_messages", "chat_notifications",
 )
@@ -42,18 +53,51 @@ def main() -> None:
             connection.scalar(text("select current_database()"))
             if engine.dialect.name == "postgresql" else str(engine.url.database)
         )
+        migration_revision = (
+            connection.scalar(text("SELECT version_num FROM alembic_version"))
+            if inspector.has_table("alembic_version") else None
+        )
         result = {
             "database": database_name,
             "dialect": engine.dialect.name,
             "checks": {name: connection.scalar(text(statement)) for name, statement in CHECKS.items()},
             "counts": {table: connection.scalar(text(f'SELECT count(*) FROM "{table}"')) for table in TABLES},
+            "migration_revision": migration_revision,
+            "tenant_schema": {
+                table: {
+                    "organization_nullable": next(
+                        column["nullable"] for column in inspector.get_columns(table)
+                        if column["name"] == "organization_id"
+                    ),
+                    "organization_fk": any(
+                        fk.get("referred_table") == "organizations"
+                        and "organization_id" in fk.get("constrained_columns", [])
+                        for fk in inspector.get_foreign_keys(table)
+                    ),
+                }
+                for table in (
+                    "users", "workspaces", "teams", "global_departments",
+                    "global_designations", "global_skills", "organization_holidays",
+                    "chat_conversations",
+                )
+            },
             "chat_participant_columns": {
                 column["name"]: {"type": str(column["type"]), "nullable": column["nullable"]}
                 for column in inspector.get_columns("chat_participants")
                 if column["name"] in {"last_read_at", "access_revoked_at"}
             },
         }
-    result["healthy"] = all(value == 0 for value in result["checks"].values())
+    result["data_healthy"] = all(value == 0 for value in result["checks"].values())
+    result["tenant_schema_healthy"] = all(
+        not state["organization_nullable"] and state["organization_fk"]
+        for state in result["tenant_schema"].values()
+    )
+    result["migration_tracking_healthy"] = result["migration_revision"] is not None
+    result["healthy"] = (
+        result["data_healthy"]
+        and result["tenant_schema_healthy"]
+        and result["migration_tracking_healthy"]
+    )
     print(json.dumps(result, indent=2, default=str))
 
 

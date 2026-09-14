@@ -10,7 +10,7 @@ from app.dependencies import (
     require_workspace_admin,
     require_workspace_member,
 )
-from app.models import Project, ProjectBoard, Sprint, Task, TaskAssignee, TaskStatus, TeamMember, User, WorkspaceMember, WorkspaceRole
+from app.models import Project, ProjectBoard, Sprint, Task, TaskAssignee, TaskStatus, TeamMember, User, Workspace, WorkspaceMember, WorkspaceRole
 from app.schemas import (
     ProjectCreate,
     ProjectRead,
@@ -24,8 +24,12 @@ router = APIRouter(tags=["Projects"])
 
 
 def validate_project_manager(db: DB, workspace_id: int, user_id: int) -> None:
+    workspace = db.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
     global_admin = db.scalar(select(User.id).where(
         User.id == user_id,
+        User.organization_id == workspace.organization_id,
         User.is_system_admin.is_(True),
         User.is_active.is_(True),
     ))

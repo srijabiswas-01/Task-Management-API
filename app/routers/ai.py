@@ -31,7 +31,10 @@ def plan_tasks(
     selected_team_ids = list(dict.fromkeys(payload.team_ids + ([payload.team_id] if payload.team_id is not None else [])))
     candidate_assignments: list[tuple[int, int]] = []
     if selected_team_ids:
-        teams = list(db.scalars(select(Team).where(Team.id.in_(selected_team_ids))).all())
+        teams = list(db.scalars(select(Team).where(
+            Team.id.in_(selected_team_ids),
+            Team.organization_id == current_user.organization_id,
+        )).all())
         if len(teams) != len(selected_team_ids) or any(team.workspace_id not in (None, project.workspace_id) for team in teams):
             raise HTTPException(status_code=400, detail="Select valid delivery teams")
         global_team_ids = [team.id for team in teams if team.workspace_id is None]
@@ -70,7 +73,7 @@ def plan_tasks(
         task.team_ids = selected_team_ids
         task.assignee_ids = [recommendation[0]] if recommendation else []
         task.assignments = ([{"user_id": recommendation[0], "team_id": recommendation[1], "responsibility": task.title, "planned_hours": max(1, (task.story_points or 1) * 4)}] if recommendation else [])
-        task.estimated_days = working_days(db, task.start_date, task.end_date)
+        task.estimated_days = working_days(db, task.start_date, task.end_date, current_user.organization_id)
         task.estimated_hours = max(1, (task.story_points or 1) * 4)
         task.planned_budget = delivery_budget * (task.story_points or 1) // total_weight if delivery_budget else None
     return AITaskPlanResponse(
@@ -128,7 +131,9 @@ def confirm_task_plan(
             )
             task.story_points = generated.story_points
             task.estimated_hours = generated.estimated_hours
-            task.estimated_days = generated.estimated_days or working_days(db, generated.start_date, generated.end_date)
+            task.estimated_days = generated.estimated_days or working_days(
+                db, generated.start_date, generated.end_date, current_user.organization_id
+            )
             task.planned_budget = generated.planned_budget
             set_task_schedule(task, None, None)
             db.add(task)

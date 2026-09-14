@@ -50,6 +50,36 @@ def test_notification_24_hour_reminder_and_read_cleanup(client: TestClient, auth
     assert all(item["id"] != reminder["id"] for item in client.get("/notifications", headers=auth_headers).json()["items"])
 
 
+def test_assistant_conversations_are_private_and_stream_grounded_answers(
+    client: TestClient, auth_headers: dict[str, str], monkeypatch,
+):
+    import app.routers.assistant as assistant_router
+
+    monkeypatch.setattr(
+        assistant_router, "answer_question",
+        lambda *args, **kwargs: ("You currently have no assigned tasks.", "test-model", "0 projects; 0 tasks"),
+    )
+    bootstrap = client.get("/assistant/bootstrap", headers=auth_headers)
+    assert bootstrap.status_code == 200
+    assert bootstrap.json()["access_label"] == "Administrator insight"
+
+    streamed = client.post("/assistant/ask", json={"question":"What should I work on?", "view":"board"}, headers=auth_headers)
+    assert streamed.status_code == 200
+    assert streamed.headers["content-type"].startswith("text/event-stream")
+    assert "You currently have no assigned tasks." in streamed.text
+    conversations = client.get("/assistant/conversations", headers=auth_headers).json()
+    assert len(conversations) == 1
+    conversation_id = conversations[0]["id"]
+    detail = client.get(f"/assistant/conversations/{conversation_id}", headers=auth_headers).json()
+    assert [message["role"] for message in detail["messages"]] == ["user", "assistant"]
+
+    outsider = client.post("/auth/register", json={"name":"Outside User", "email":"outside-assistant@example.com", "password":"securepass123"}).json()
+    assert client.patch(f"/admin/users/{outsider['id']}/approve", headers=auth_headers).status_code == 200
+    login = client.post("/auth/login", data={"username":"outside-assistant@example.com", "password":"securepass123"}).json()
+    outsider_headers = {"Authorization": f"Bearer {login['access_token']}"}
+    assert client.get(f"/assistant/conversations/{conversation_id}", headers=outsider_headers).status_code == 404
+
+
 def test_register_login_and_me(client: TestClient):
     registered = client.post(
         "/auth/register",
@@ -140,6 +170,46 @@ def test_global_skill_catalog_rename_and_delete_sync_profiles(
     assert "Python" in skills
 
 
+def test_repeated_profile_save_is_idempotent(
+    client: TestClient, auth_headers: dict[str, str]
+):
+    """Saving the same existing profile must never create a duplicate row."""
+    payload = {"name": "Test User", "skills": "Python", "achievements": "Reliable delivery"}
+    first = client.put("/auth/profile", headers=auth_headers, json=payload)
+    second = client.put("/auth/profile", headers=auth_headers, json=payload)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["achievements"] == "Reliable delivery"
+
+
+def test_skill_catalog_allows_same_skill_in_separate_organizations(client: TestClient):
+    """Catalogue synchronization must be tenant-scoped and safe on GET."""
+    headers = []
+    for index in (1, 2):
+        email = f"skill-admin-{index}@example.com"
+        registered = client.post("/auth/register", json={
+            "name": f"Skill Admin {index}", "email": email,
+            "password": "securepass123", "organization_mode": "create",
+            "organization_name": f"Skill Organization {index}",
+        })
+        assert registered.status_code == 201
+        token = client.post("/auth/login", data={
+            "username": email, "password": "securepass123",
+        }).json()["access_token"]
+        current_headers = {"Authorization": f"Bearer {token}"}
+        assert client.put("/auth/profile", headers=current_headers, json={
+            "name": f"Skill Admin {index}", "skills": "Python",
+        }).status_code == 200
+        headers.append(current_headers)
+
+    first = client.get("/admin/skill-catalog-items", headers=headers[0])
+    second = client.get("/admin/skill-catalog-items", headers=headers[1])
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert [item["name"] for item in first.json()] == ["Python"]
+    assert [item["name"] for item in second.json()] == ["Python"]
+
+
 def test_only_one_simultaneous_first_registration_becomes_admin(client: TestClient):
     def register(index: int):
         return client.post(
@@ -190,6 +260,116 @@ def test_auth_normalizes_email_and_rejects_bad_credentials(client: TestClient):
         "/auth/me", headers={"Authorization": "Bearer not-a-valid-token"}
     )
     assert invalid_token.status_code == 401
+
+
+def test_organization_registration_is_case_insensitive_and_join_requires_approval(
+    client: TestClient,
+):
+    creator = client.post("/auth/register", json={
+        "name": "Acme Admin", "email": "admin@acme.example",
+        "password": "securepass123", "organization_mode": "create",
+        "organization_name": "Acme Corporation",
+    })
+    assert creator.status_code == 201
+    organization_id = creator.json()["organization_id"]
+    assert creator.json()["organization_name"] == "Acme Corporation"
+    assert creator.json()["is_system_admin"] is True
+
+    duplicate = client.post("/auth/register", json={
+        "name": "Other Admin", "email": "other@acme.example",
+        "password": "securepass123", "organization_mode": "create",
+        "organization_name": "  ACME corporation  ",
+    })
+    assert duplicate.status_code == 409
+
+    member = client.post("/auth/register", json={
+        "name": "Acme Member", "email": "member@acme.example",
+        "password": "securepass123", "organization_mode": "join",
+        "organization_id": organization_id,
+    })
+    assert member.status_code == 201
+    assert member.json()["organization_id"] == organization_id
+    assert member.json()["is_active"] is False
+    denied_login = client.post(
+        "/auth/login", data={"username": "member@acme.example", "password": "securepass123"}
+    )
+    assert denied_login.status_code == 403
+
+
+def test_organization_admin_cannot_view_or_approve_another_tenants_user(
+    client: TestClient,
+):
+    first = client.post("/auth/register", json={
+        "name": "First Admin", "email": "first-admin@example.com",
+        "password": "securepass123", "organization_mode": "create",
+        "organization_name": "First Organization",
+    }).json()
+    first_login = client.post(
+        "/auth/login", data={"username": first["email"], "password": "securepass123"}
+    ).json()
+    first_headers = {"Authorization": f"Bearer {first_login['access_token']}"}
+
+    second = client.post("/auth/register", json={
+        "name": "Second Admin", "email": "second-admin@example.com",
+        "password": "securepass123", "organization_mode": "create",
+        "organization_name": "Second Organization",
+    }).json()
+    directory = client.get("/admin/users", headers=first_headers)
+    assert directory.status_code == 200
+    assert all(item["user_id"] != second["id"] for item in directory.json())
+    assert client.patch(
+        f"/admin/users/{second['id']}/approve", headers=first_headers
+    ).status_code == 404
+
+
+def test_only_organization_admin_can_rename_organization(client: TestClient):
+    admin = client.post("/auth/register", json={
+        "name": "Tenant Admin", "email": "tenant-admin@example.com",
+        "password": "securepass123", "organization_mode": "create",
+        "organization_name": "Original Tenant",
+    }).json()
+    login = client.post("/auth/login", data={
+        "username": admin["email"], "password": "securepass123",
+    }).json()
+    headers = {"Authorization": f"Bearer {login['access_token']}"}
+    renamed = client.patch(
+        "/auth/organization", json={"name": "Renamed Tenant"}, headers=headers,
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Renamed Tenant"
+    assert client.get("/auth/me", headers=headers).json()["organization_name"] == "Renamed Tenant"
+
+    member = client.post("/auth/register", json={
+        "name": "Tenant Member", "email": "tenant-member@example.com",
+        "password": "securepass123", "organization_mode": "join",
+        "organization_id": admin["organization_id"],
+    }).json()
+    assert client.patch(f"/admin/users/{member['id']}/approve", headers=headers).status_code == 200
+    member_login = client.post("/auth/login", data={
+        "username": member["email"], "password": "securepass123",
+    }).json()
+    member_headers = {"Authorization": f"Bearer {member_login['access_token']}"}
+    assert client.patch(
+        "/auth/organization", json={"name": "Forbidden Rename"}, headers=member_headers,
+    ).status_code == 403
+
+
+def test_renamed_legacy_organization_is_reused_by_legacy_registration(
+    client: TestClient, auth_headers: dict[str, str],
+):
+    current = client.get("/auth/me", headers=auth_headers).json()
+    renamed = client.patch(
+        "/auth/organization", json={"name": "Renamed ABC Tenant"}, headers=auth_headers,
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["slug"] == "abc-organization"
+    joined = client.post("/auth/register", json={
+        "name": "Legacy Client User", "email": "legacy-client@example.com",
+        "password": "securepass123",
+    })
+    assert joined.status_code == 201
+    assert joined.json()["organization_id"] == current["organization_id"]
+    assert joined.json()["organization_name"] == "Renamed ABC Tenant"
 
 
 def test_inactive_user_cannot_login(client: TestClient):

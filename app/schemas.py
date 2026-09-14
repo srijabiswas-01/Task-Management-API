@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
@@ -13,6 +14,27 @@ class UserRegister(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
+    organization_mode: Literal["create", "join"] | None = None
+    organization_name: str | None = Field(default=None, min_length=2, max_length=180)
+    organization_id: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_organization_choice(self):
+        if self.organization_mode == "create" and not (self.organization_name or "").strip():
+            raise ValueError("Enter an organization name")
+        if self.organization_mode == "join" and self.organization_id is None:
+            raise ValueError("Select an existing organization")
+        return self
+
+
+class OrganizationRead(ORMModel):
+    id: int
+    name: str
+    slug: str
+
+
+class OrganizationUpdate(BaseModel):
+    name: str = Field(min_length=2, max_length=180)
 
 
 class UserRead(ORMModel):
@@ -22,6 +44,8 @@ class UserRead(ORMModel):
     is_active: bool
     is_system_admin: bool = False
     is_member: bool = False
+    organization_id: int
+    organization_name: str
     profile_image: str | None = None
     created_at: datetime
 

@@ -44,7 +44,8 @@ def require_workspace_member(
 ) -> WorkspaceMember:
     user = db.get(User, user_id)
     if user and user.is_active and user.is_system_admin:
-        if db.get(Workspace, workspace_id) is None:
+        workspace = db.get(Workspace, workspace_id)
+        if workspace is None or workspace.organization_id != user.organization_id:
             raise HTTPException(status_code=404, detail="Workspace not found")
         return WorkspaceMember(
             workspace_id=workspace_id, user_id=user_id,
@@ -127,9 +128,9 @@ def require_project_contributor(db: Session, project_id: int, user_id: int) -> W
 
 def require_team_admin(db: Session, team_id: int, user_id: int) -> Team:
     team = db.get(Team, team_id)
-    if team is None:
-        raise HTTPException(status_code=404, detail="Team not found")
     user = db.get(User, user_id)
+    if team is None or user is None or team.organization_id != user.organization_id:
+        raise HTTPException(status_code=404, detail="Team not found")
     if user and user.is_active and user.is_system_admin:
         return team
     if team.workspace_id is None:

@@ -3,16 +3,34 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.core.security import create_access_token, hash_password, verify_password
 from app.core.skills import normalize_skills, parse_skills
 from app.core.profile import profile_completion, validate_profile_image
 from app.dependencies import CurrentUser, DB
-from app.models import Project, Task, TaskAssignee, TeamMember, User, UserProfile
-from app.schemas import Token, UserProfileRead, UserProfileUpdate, UserRead, UserRegister
+from app.models import Organization, Project, Task, TaskAssignee, TeamMember, User, UserProfile
+from app.schemas import OrganizationRead, OrganizationUpdate, Token, UserProfileRead, UserProfileUpdate, UserRead, UserRegister
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+LEGACY_ORGANIZATION_NAME = "ABC Organization"
+
+
+def organization_slug(name: str) -> str:
+    """Build the canonical organization slug used for uniqueness."""
+    import re
+    return re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-") or "organization"
+
+
+@router.get("/organizations", response_model=list[OrganizationRead])
+def list_public_organizations(db: DB, q: str = "") -> list[Organization]:
+    """Provide a bounded organization picker without exposing tenant records."""
+    query = select(Organization).where(Organization.is_active.is_(True))
+    normalized = " ".join(q.split()).casefold()
+    if normalized:
+        query = query.where(func.lower(Organization.name).contains(normalized))
+    return list(db.scalars(query.order_by(Organization.name).limit(25)).all())
 
 
 def lock_registration_bootstrap(db: DB) -> None:
@@ -36,16 +54,45 @@ def register(payload: UserRegister, db: DB) -> User:
     exists = db.scalar(select(User).where(func.lower(User.email) == email))
     if exists:
         raise HTTPException(status_code=409, detail="Email is already registered")
-    # The first account bootstraps the installation. Later accounts require
-    # approval by an existing workspace administrator.
     is_first_account = db.scalar(select(func.count(User.id))) == 0
+    if payload.organization_mode == "create":
+        name = " ".join(payload.organization_name.strip().split())
+        if db.scalar(select(Organization.id).where(func.lower(Organization.name) == name.casefold())):
+            raise HTTPException(status_code=409, detail="An organization with this name already exists")
+        slug = organization_slug(name)
+        if db.scalar(select(Organization.id).where(Organization.slug == slug)):
+            raise HTTPException(status_code=409, detail="An organization with this name already exists")
+        organization = Organization(name=name, slug=slug)
+        db.add(organization)
+        db.flush()
+        creates_organization = True
+    elif payload.organization_mode == "join":
+        organization = db.scalar(select(Organization).where(
+            Organization.id == payload.organization_id,
+            Organization.is_active.is_(True),
+        ))
+        if organization is None:
+            raise HTTPException(status_code=400, detail="Select a valid organization")
+        creates_organization = False
+    else:
+        # Backward compatibility for existing clients during the tenant rollout.
+        organization = db.scalar(select(Organization).where(
+            (Organization.slug == "abc-organization") |
+            (func.lower(Organization.name) == LEGACY_ORGANIZATION_NAME.casefold())
+        ))
+        if organization is None:
+            organization = Organization(name=LEGACY_ORGANIZATION_NAME, slug="abc-organization")
+            db.add(organization)
+            db.flush()
+        creates_organization = is_first_account
     user = User(
+        organization_id=organization.id,
         name=payload.name.strip(),
         email=email,
         hashed_password=hashed_password,
-        is_active=is_first_account,
-        is_system_admin=is_first_account,
-        is_member=is_first_account,
+        is_active=creates_organization,
+        is_system_admin=creates_organization,
+        is_member=creates_organization,
     )
     db.add(user)
     db.commit()
@@ -79,10 +126,36 @@ def me(current_user: CurrentUser) -> User:
     return current_user
 
 
+@router.patch("/organization", response_model=OrganizationRead)
+def update_organization(
+    payload: OrganizationUpdate, db: DB, current_user: CurrentUser,
+) -> Organization:
+    """Allow an organization Admin to rename only their own tenant."""
+    if not current_user.is_system_admin:
+        raise HTTPException(status_code=403, detail="Organization administrator access required")
+    name = " ".join(payload.name.strip().split())
+    duplicate = db.scalar(select(Organization.id).where(
+        Organization.id != current_user.organization_id,
+        func.lower(Organization.name) == name.casefold(),
+    ))
+    if duplicate is not None:
+        raise HTTPException(status_code=409, detail="An organization with this name already exists")
+    organization = db.get(Organization, current_user.organization_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    organization.name = name
+    db.commit()
+    db.refresh(organization)
+    return organization
+
+
 @router.get("/skill-catalog", response_model=list[str])
 def skill_catalog(db: DB, current_user: CurrentUser) -> list[str]:
     values = db.scalars(
-        select(UserProfile.skills).join(User).where(User.is_active.is_(True))
+        select(UserProfile.skills).join(User).where(
+            User.organization_id == current_user.organization_id,
+            User.is_active.is_(True),
+        )
     ).all()
     catalog: dict[str, str] = {}
     for value in values:
@@ -202,12 +275,34 @@ def update_profile(
         raise HTTPException(status_code=403, detail="Only an admin can change your designation")
     if "department" in payload.model_fields_set and payload.department != profile.department:
         raise HTTPException(status_code=403, detail="Only an admin can change your department")
-    for field, value in payload.model_dump(
+    profile_values = payload.model_dump(
         exclude={"name", "professional_title", "department"}, exclude_unset=True
-    ).items():
-        if field == "skills":
-            value = normalize_skills(value)
-        setattr(profile, field, value.strip() if isinstance(value, str) and field != "profile_image" else value)
-    db.commit()
+    )
+
+    def apply_values(target: UserProfile) -> None:
+        """Normalize and apply fields that users may edit themselves."""
+        for field, value in profile_values.items():
+            if field == "skills":
+                value = normalize_skills(value)
+            setattr(target, field, value.strip() if isinstance(value, str) and field != "profile_image" else value)
+
+    apply_values(profile)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # Concurrent first-save requests can both attempt the unique profile
+        # insert. Reload the winning row and safely apply this request once.
+        constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", "")
+        db.rollback()
+        if constraint not in {"ix_user_profiles_user_id", "user_profiles_user_id_key"}:
+            raise
+        fresh_user = db.get(User, current_user.id)
+        fresh_profile = db.scalar(select(UserProfile).where(UserProfile.user_id == current_user.id))
+        if fresh_user is None or fresh_profile is None:
+            raise
+        fresh_user.name = payload.name.strip()
+        apply_values(fresh_profile)
+        db.commit()
+        current_user = fresh_user
     db.refresh(current_user)
     return profile_response(db, current_user)

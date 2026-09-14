@@ -1,0 +1,116 @@
+/* Organization identity is loaded last so account-menu defaults cannot reduce legibility. */
+.header-account-menu {
+  width: min(250px, calc(100vw - 24px));
+}
+
+.header-account-menu button svg {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.header-organization {
+  gap: 5px;
+  padding: 10px 11px 11px;
+}
+
+.header-organization small,
+.profile-organization small {
+  font-size: 9px;
+  letter-spacing: .1em;
+}
+
+.header-organization strong {
+  overflow: visible;
+  color: var(--purple);
+  font: 800 14px/1.35 Manrope, sans-serif;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.profile-organization strong {
+  font: 800 14px/1.4 Manrope, sans-serif;
+}
+
+.user-chip {
+  align-items: flex-start;
+  padding-block: 14px 11px;
+}
+
+.user-chip > div {
+  overflow: visible;
+}
+
+.user-chip strong,
+.user-chip small,
+.user-chip .user-designation,
+.user-chip .user-organization,
+.user-chip #user-email {
+  overflow: visible;
+  max-width: 100%;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.user-chip strong {
+  font-size: 12px;
+}
+
+.user-chip .user-designation {
+  margin-top: 3px;
+  font-size: 9px;
+}
+
+.user-chip .user-organization {
+  overflow: visible;
+  color: var(--blue);
+  font: 700 10px/1.35 Manrope, sans-serif;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.user-chip #user-email {
+  margin-top: 3px;
+  font-size: 9px;
+}
+
+.profile-organization-editor {
+  flex-wrap: wrap;
+}
+
+.member-report-drawer.member-report-loading {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 30px;
+  text-align: center;
+}
+
+.member-report-loading .boot-orbit {
+  position: static;
+  min-height: 70px;
+  background: transparent;
+}
+
+.member-report-loading strong {
+  font: 800 17px Manrope, sans-serif;
+}
+
+.member-report-loading span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+@media (max-width: 620px) {
+  .header-account-menu {
+    right: -2px;
+  }
+}

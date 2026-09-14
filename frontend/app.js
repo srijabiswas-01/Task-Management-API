@@ -96,6 +96,39 @@ function downloadVisualPdf(pages,fileName){
   const link=document.createElement("a");link.href=URL.createObjectURL(new Blob([pdf],{type:"application/pdf"}));link.download=`${fileName}.pdf`;link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);
 }
 function pdfPageHeader(title,subtitle,page){return [pdfRect(0,0,PDF_W,PDF_H,"#f6f8fc"),pdfLabel("ORBIT",32,22,9,"#526dff",true),pdfLabel(title,32,38,20,"#17233c",true,650),pdfLabel(subtitle,32,64,9,"#71809c",false,650),pdfLabel(`Page ${page}`,755,34,8,"#71809c")];}
+/** Draws a compact percentage gauge that remains crisp in downloaded PDFs. */
+function pdfGauge(commands,label,value,x,y,width=174,color="#526dff"){
+  const safe=Math.max(0,Math.min(100,Number(value)||0));
+  commands.push(pdfRect(x,y,width,72,"#ffffff","#e4e9f1"),pdfLabel(label,x+12,y+11,8,"#71809c",true,width-24),pdfLabel(`${safe}%`,x+12,y+29,17,"#17233c",true,width-24),pdfRect(x+12,y+56,width-24,7,"#e7ebf3"));
+  if(safe)commands.push(pdfRect(x+12,y+56,(width-24)*safe/100,7,color));
+}
+/** Adds a vector bar-chart page so visual dashboard data is included in exports. */
+function appendPdfBarChartPage(pages,title,subtitle,rows,{valueLabel=value=>String(value),color="#526dff",maxRows=10}={}){
+  const clean=rows.filter(row=>Number.isFinite(Number(row[1]))),groups=[];
+  for(let index=0;index<Math.max(1,clean.length);index+=maxRows)groups.push(clean.slice(index,index+maxRows));
+  groups.forEach(group=>{
+    const page=pdfPageHeader(title,subtitle,pages.length+1),max=Math.max(1,...group.map(row=>Number(row[1])||0));
+    page.push(pdfLabel("Visual comparison",32,96,11,"#17233c",true),pdfLabel("Values are drawn proportionally from the same live data used by the dashboard.",32,114,8,"#71809c",false,700));
+    group.forEach(([label,value,rowColor],index)=>{
+      const y=145+index*39,numeric=Math.max(0,Number(value)||0),barWidth=500*numeric/max;
+      page.push(pdfLabel(label,32,y,8,"#17233c",true,180),pdfRect(218,y+1,500,12,"#e7ebf3"));
+      if(barWidth)page.push(pdfRect(218,y+1,barWidth,12,rowColor||color));
+      page.push(pdfLabel(valueLabel(numeric),730,y,8,"#17233c",true,78));
+    });
+    if(!group.length)page.push(pdfLabel("No visual data is available for the current selection.",32,155,9,"#71809c"));
+    pages.push(page);
+  });
+}
+/** Adds a visual KPI page with gauges and a distribution chart. */
+function appendPdfGaugeDashboard(pages,title,subtitle,gauges,distribution=[]){
+  const page=pdfPageHeader(title,subtitle,pages.length+1),colors=["#23a06b","#526dff","#8557d8","#e59a29"];
+  gauges.slice(0,4).forEach(([label,value,color],index)=>pdfGauge(page,label,value,32+index*197,96,185,color||colors[index]));
+  page.push(pdfLabel("Distribution",32,196,12,"#17233c",true));
+  const max=Math.max(1,...distribution.map(row=>Number(row[1])||0));
+  distribution.slice(0,8).forEach(([label,value,color],index)=>{const y=225+index*38,numeric=Math.max(0,Number(value)||0);page.push(pdfLabel(label,32,y,8,"#17233c",true,165),pdfRect(210,y+1,510,12,"#e7ebf3"));if(numeric)page.push(pdfRect(210,y+1,510*numeric/max,12,color||colors[index%colors.length]));page.push(pdfLabel(numeric,735,y,8,"#17233c",true,60))});
+  if(!distribution.length)page.push(pdfLabel("No distribution data is available.",32,226,9,"#71809c"));
+  pages.push(page);
+}
 function safeFileName(value){return String(value||"export").trim().replace(/[^a-z0-9_-]+/gi,"-").replace(/^-+|-+$/g,"").toLowerCase()||"export"}
 function exportBoardPdf(){
   const columns=state.board?.columns||[],groups=[];for(let i=0;i<Math.max(1,columns.length);i+=4)groups.push(columns.slice(i,i+4));const pages=[];
@@ -128,6 +161,9 @@ function exportProjectReportPdf(){
   for(let offset=0;offset<Math.max(1,state.tasks.length);offset+=9){const tasks=state.tasks.slice(offset,offset+9),page=pdfPageHeader(`${state.project.name} — Task Delivery`,`${state.tasks.length} tasks · schedule, ownership, progress and cost`,pages.length+1),widths=[165,72,105,190,65,75,106],headers=["Task","Status","Schedule","Teams and members","Progress","Effort","Planned cost"];let x=24;headers.forEach((label,index)=>{page.push(pdfRect(x,92,widths[index],27,"#edf0f6","#dfe5ef"),pdfLabel(label,x+5,101,6.5,"#17233c",true,widths[index]-10));x+=widths[index]});tasks.forEach((task,row)=>{const y=119+row*48,assignments=task.assignments||[],members=assignments.map(item=>state.members.find(member=>member.user_id===item.user_id)?.user?.name||`#${item.user_id}`).join(", ")||"Unassigned",teams=[...new Set(assignments.map(item=>state.teams.find(team=>team.id===item.team_id)?.name).filter(Boolean))].join(", "),values=[task.title,pretty(task.status),`${task.start_date?date(task.start_date):"Not set"} - ${task.due_date?date(task.due_date):"Not set"}`,`${teams||"No team"}: ${members}`,`${task.progress}%`,`${task.estimated_days??"-"}d / ${task.estimated_hours??"-"}h`,money(task.planned_budget)];let cellX=24;values.forEach((value,index)=>{page.push(pdfRect(cellX,y,widths[index],48,row%2?"#f8f9fc":"#ffffff","#e4e9f1"),pdfLabel(value,cellX+5,y+16,6.5,"#17233c",index===0,widths[index]-10));cellX+=widths[index]})});if(!tasks.length)page.push(pdfLabel("No tasks have been created",32,145,10,"#71809c",true));pages.push(page)}
   const resourcePage=pdfPageHeader(`${state.project.name} — Budget & Resources`,`Financial planning, actual cost and workload analysis`,pages.length+1),planned=Number(r.budget.planned||0),taskPlanned=Number(r.budget.task_planned||0),actual=Number(r.budget.actual||0),maxCost=Math.max(1,planned,taskPlanned,actual);resourcePage.push(pdfLabel("Budget analysis",32,98,14,"#17233c",true));[["Project budget",planned,"#526dff"],["Task planned cost",taskPlanned,"#8557d8"],["Actual cost recorded",actual,"#23a06b"]].forEach(([label,value,color],index)=>{const y=128+index*48;resourcePage.push(pdfLabel(label,32,y,9,"#526076",true),pdfLabel(money(value),650,y,9,"#17233c",true,155),pdfRect(32,y+19,760,10,"#e4e9f1"),pdfRect(32,y+19,760*value/maxCost,10,color))});resourcePage.push(pdfLabel("Resource workload",32,302,14,"#17233c",true));const resources=state.teams.map(team=>{const assignments=state.tasks.flatMap(task=>(task.assignments||[]).filter(item=>item.team_id===team.id));return {name:team.name,tasks:new Set(state.tasks.filter(task=>(task.assignments||[]).some(item=>item.team_id===team.id)).map(task=>task.id)).size,members:new Set(assignments.map(item=>item.user_id)).size,hours:assignments.reduce((sum,item)=>sum+(item.planned_hours||0),0)}}).filter(item=>item.tasks);resources.slice(0,8).forEach((item,index)=>resourcePage.push(pdfRect(32+(index%2)*394,330+Math.floor(index/2)*49,382,39,"#ffffff","#e4e9f1"),pdfLabel(item.name,42+(index%2)*394,340+Math.floor(index/2)*49,9,"#17233c",true,190),pdfLabel(`${item.members} members · ${item.tasks} tasks · ${item.hours}h`,240+(index%2)*394,340+Math.floor(index/2)*49,8,"#71809c",false,165)));if(!resources.length)resourcePage.push(pdfLabel("No task-level team allocations are recorded.",32,334,9,"#71809c"));pages.push(resourcePage);
   const insightPage=pdfPageHeader(`${state.project.name} — Final Insights`,`Management observations generated from the current report data`,pages.length+1);projectReportInsights(r).forEach((item,index)=>{const y=100+index*82,color=item.tone==="danger"?"#df5261":item.tone==="warn"?"#e59a29":"#23a06b";insightPage.push(pdfRect(32,y,778,66,"#ffffff","#e4e9f1"),pdfRect(32,y,6,66,color),pdfLabel(item.title,52,y+13,11,"#17233c",true,735),...pdfWrapped(item.text,52,y+34,735,8,"#71809c",false,2,11))});pages.push(insightPage);
+  const completion=r.tasks.total?Math.round(r.tasks.completed*100/r.tasks.total):0,budgetUse=Number(r.budget.planned)?Math.round(Math.min(100,Number(r.budget.task_planned||0)*100/Number(r.budget.planned))):0;
+  appendPdfGaugeDashboard(pages,`${state.project.name} — Visual delivery dashboard`,"Completion, schedule, task closure and budget allocation diagrams",[["Work completion",r.progress,"#23a06b"],["Timeline elapsed",r.schedule_percent,"#526dff"],["Tasks completed",completion,"#8557d8"],["Budget allocated",budgetUse,"#e59a29"]],STATUS.map(([key,label],index)=>[label,r.workflow?.[key]||0,["#94a3b8","#526dff","#e59a29","#8557d8","#a855f7","#23a06b"][index]]));
+  appendPdfBarChartPage(pages,`${state.project.name} — Team workload diagram`,"Planned assignment hours by participating team",resources.map(item=>[`${item.name} (${item.tasks} tasks / ${item.members} members)`,item.hours]),{valueLabel:value=>`${value} h`,color:"#8557d8"});
   appendTaskDetailPdfPages(pages,`${state.project.name} — Project Report`,state.tasks);
   downloadVisualPdf(pages,`${safeFileName(state.project.name)}-project-report`);toast("Complete project report PDF downloaded");
 }
@@ -143,7 +179,7 @@ function toast(message, error = false) {
 }
 async function api(path, options = {}) {
   const headers = {...(options.headers || {})};
-  const publicAuthRequest = path === "/auth/login" || path === "/auth/register";
+  const publicAuthRequest = path === "/auth/login" || path === "/auth/register" || path.startsWith("/auth/organizations");
   const authenticatedRequest = Boolean(state.token) && !publicAuthRequest;
   if (authenticatedRequest) headers.Authorization = `Bearer ${state.token}`;
   if (options.body && !(options.body instanceof URLSearchParams)) headers["Content-Type"] = "application/json";
@@ -242,6 +278,22 @@ $("#footer-terms").onclick=()=>footerInformationModal("terms");
 $("#footer-help").onclick=()=>footerInformationModal("help");
 $("#footer-health").onclick=()=>modal(`<h2>System health</h2><p class="subtitle">Current application and database availability.</p><div class="footer-health-details"><span>Service<strong>${pretty(footerHealth.status)}</strong></span><span>Database<strong>${pretty(footerHealth.database)}</strong></span><span>Version<strong>v${esc(footerHealth.version)}</strong></span></div><div class="modal-actions"><button type="button" class="btn" data-footer-health-refresh>Check again</button><button type="button" class="btn primary" data-footer-close>Close</button></div>`,()=>{$("[data-footer-close]").onclick=closeModal;$("[data-footer-health-refresh]").onclick=async()=>{closeModal();await loadFooterHealth();$("#footer-health").click()}});
 let registerMode = false;
+async function loadRegistrationOrganizations(){
+  const select=$("#register-organization-id");
+  if(!select)return;
+  try{
+    const organizations=await api("/auth/organizations");
+    select.innerHTML='<option value="">Select organization</option>'+organizations.map(item=>'<option value="'+item.id+'">'+esc(item.name)+'</option>').join("");
+  }catch(error){select.innerHTML='<option value="">Organizations unavailable</option>';authError(error.message)}
+}
+function syncOrganizationRegistration(){
+  const mode=$("input[name='organization_mode']:checked")?.value||"join";
+  $("#register-organization-existing").classList.toggle("hidden",mode!=="join");
+  $("#register-organization-new").classList.toggle("hidden",mode!=="create");
+  $("#register-organization-id").required=mode==="join";
+  $("#register-organization-name").required=mode==="create";
+}
+$$('input[name="organization_mode"]').forEach(input=>input.onchange=syncOrganizationRegistration);
 $("#auth-switch").onclick = () => {
   registerMode = !registerMode;
   $("#login-form").classList.toggle("hidden", registerMode);
@@ -251,6 +303,7 @@ $("#auth-switch").onclick = () => {
   $("#switch-copy").textContent = registerMode ? "Already have an account?" : "New to Orbit?";
   $("#auth-switch").textContent = registerMode ? "Sign in" : "Create an account";
   $("#auth-error").classList.add("hidden");
+  if(registerMode){syncOrganizationRegistration();loadRegistrationOrganizations()}
 };
 $$("[data-password-target]").forEach(button=>button.onclick=()=>{
   const input=document.getElementById(button.dataset.passwordTarget);
@@ -287,8 +340,15 @@ $("#login-form").onsubmit = async e => {
 $("#register-form").onsubmit = async e => {
   e.preventDefault();
   if(!validateAuthForm(e.currentTarget,true))return;
+  const selectedOrganizationMode=$("input[name='organization_mode']:checked")?.value||"join";
+  if(selectedOrganizationMode==="join"&&!$("#register-organization-id").value){fieldError($("#register-organization-id"),"Select an existing organization.");return}
+  if(selectedOrganizationMode==="create"&&$("#register-organization-name").value.trim().length<2){fieldError($("#register-organization-name"),"Enter an organization name.");return}
   try {
-    const user = await api("/auth/register", {method:"POST", body:JSON.stringify({name:$("#register-name").value,email:$("#register-email").value,password:$("#register-password").value})});
+    const organization_mode=$("input[name='organization_mode']:checked")?.value||"join";
+    const registration={name:$("#register-name").value,email:$("#register-email").value,password:$("#register-password").value,organization_mode};
+    if(organization_mode==="create")registration.organization_name=$("#register-organization-name").value;
+    else registration.organization_id=Number($("#register-organization-id").value)||null;
+    const user = await api("/auth/register", {method:"POST", body:JSON.stringify(registration)});
     if (user.is_active) {
       const body = new URLSearchParams({username:$("#register-email").value,password:$("#register-password").value});
       const data = await api("/auth/login", {method:"POST",body,headers:{"Content-Type":"application/x-www-form-urlencoded"}});
@@ -307,23 +367,37 @@ $("#register-form").onsubmit = async e => {
   } catch (err) { if(/email is already registered/i.test(err.message))fieldError($("#register-email"),err.message);else authError(err.message); }
 };
 function authError(message, success = false) { $("#auth-error").textContent = message; $("#auth-error").classList.toggle("success", success); $("#auth-error").classList.remove("hidden"); }
+function syncAssistantAuthentication(authenticated) {
+  window.setOrbitAssistantAuthenticated?.(authenticated);
+  document.dispatchEvent(new CustomEvent("orbit:authentication", {detail:{authenticated}}));
+}
 function logout(show = true) {
   state.token = null;
+  state.user = null;
   localStorage.removeItem("orbit_token");
   $("#auth-error").classList.add("hidden");
   $("#app-shell").classList.add("hidden");
   $("#auth-screen").classList.remove("hidden");
+  syncAssistantAuthentication(false);
   if (show) toast("Signed out");
 }
 function showAuth() {
   $("#boot-screen").classList.add("hidden");
   $("#app-shell").classList.add("hidden");
   $("#auth-screen").classList.remove("hidden");
+  syncAssistantAuthentication(false);
 }
 $("#logout-button").onclick = () => logout();
 $("#header-logout-button").onclick = () => logout();
 $("#header-profile-button").onclick = () => {$("#header-account-menu").classList.add("hidden");navigate("profile")};
-$("#header-report-button").onclick = () => {$("#header-account-menu").classList.add("hidden");openMemberReport()};
+$("#header-report-button").onclick = async event => {
+  event.stopPropagation();
+  const button=event.currentTarget;
+  $("#header-account-menu").classList.add("hidden");
+  $("#header-account-button").setAttribute("aria-expanded","false");
+  button.disabled=true;button.setAttribute("aria-busy","true");
+  try{await openMemberReport()}finally{button.disabled=false;button.removeAttribute("aria-busy")}
+};
 $("#header-account-button").onclick = event => {event.stopPropagation();const menu=$("#header-account-menu"),hidden=menu.classList.toggle("hidden");$("#header-account-button").setAttribute("aria-expanded",String(!hidden))};
 document.addEventListener("click",event=>{if(!event.target.closest(".header-account")){$("#header-account-menu").classList.add("hidden");$("#header-account-button").setAttribute("aria-expanded","false")}});
 
@@ -345,8 +419,9 @@ function invalidateCached(...prefixes){
   for(const key of responseCache.keys())if(prefixes.some(prefix=>key.startsWith(prefix)))responseCache.delete(key);
 }
 function syncUserChrome(){
-  const name=state.profile?.name||state.user?.name||"User",email=state.profile?.email||state.user?.email||"",designation=[state.profile?.professional_title,state.profile?.department].filter(Boolean).join(" · ")||"Designation not assigned",photo=state.profile?.profile_image;
-  [["#user-name",name],["#user-email",email],["#user-designation",designation],["#header-user-name",name],["#header-user-email",email],["#header-user-designation",designation]].forEach(([selector,value])=>{const element=$(selector);if(element)element.textContent=value});
+  const name=state.profile?.name||state.user?.name||"User",email=state.profile?.email||state.user?.email||"",organization=state.user?.organization_name||"Organization not assigned",designation=[state.profile?.professional_title,state.profile?.department].filter(Boolean).join(" · ")||"Designation not assigned",photo=state.profile?.profile_image;
+  [["#user-name",name],["#user-email",email],["#user-designation",designation],["#user-organization",organization],["#header-user-name",name],["#header-user-email",email],["#header-user-designation",designation],["#header-user-organization",organization]].forEach(([selector,value])=>{const element=$(selector);if(element)element.textContent=value});
+  [["#user-name",name],["#user-email",email],["#user-designation",designation],["#user-organization",organization],["#header-user-name",name],["#header-user-organization",organization]].forEach(([selector,value])=>{const element=$(selector);if(element)element.title=value});
   ["#user-avatar","#header-user-avatar"].forEach(selector=>{const avatar=$(selector);if(!avatar)return;avatar.textContent=photo?"":name.slice(0,2).toUpperCase();avatar.style.backgroundImage=photo?`url("${photo}")`:"";avatar.classList.toggle("has-photo",Boolean(photo))});
   $("#header-report-button")?.classList.toggle("hidden",!(state.user?.is_member||state.user?.is_system_admin));
   $("#footer-health")?.classList.toggle("hidden",!isAdmin());
@@ -378,6 +453,7 @@ async function boot() {
     syncUserChrome();
     $("#auth-error").classList.add("hidden");
     $("#auth-screen").classList.add("hidden"); $("#app-shell").classList.remove("hidden");
+    syncAssistantAuthentication(true);
     if (!PATH_VIEWS[window.location.pathname]) {
       history.replaceState({view:state.view}, "", VIEW_PATHS[state.view]);
     }
@@ -406,6 +482,7 @@ async function boot() {
     // report application-data failures without redirecting to the login page.
     $("#auth-screen").classList.add("hidden");
     $("#app-shell").classList.remove("hidden");
+    syncAssistantAuthentication(true);
     $("#boot-screen").classList.add("hidden");
     toast(err.message || "Could not load your workspace", true);
   }
@@ -567,15 +644,6 @@ async function loadProject() {
   }
   state.projectLoading=false;
 }
-let refreshPromise=null;
-async function refresh() {
-  if(refreshPromise)return refreshPromise;
-  const button=$("#refresh-button");if(button)button.disabled=true;
-  refreshPromise=(async()=>{invalidateCached("/admin/","/auth/skill-catalog",state.workspace?`/workspaces/${state.workspace.id}/`:"");if(state.view==="chat")await loadChats();else if(state.view==="notifications")await loadNotifications(true);else if(state.view==="analytics"){state.analytics=await cachedApi("/admin/team-member-analytics",{force:true});render()}else if(state.workspace)await loadWorkspace(true);else await loadNoWorkspaceMIS()})();
-  try{await refreshPromise}finally{refreshPromise=null;if(button)button.disabled=false}
-}
-$("#refresh-button").onclick = refresh;
-$("#quick-task").onclick = () => state.project ? taskModal() : toast("Create a project first", true);
 if(localStorage.getItem("orbit_sidebar_collapsed")==="true")$("#app-shell").classList.add("sidebar-collapsed");
 const closeMobileSidebar=()=>{$(".sidebar").classList.remove("open");document.body.classList.remove("mobile-navigation-open");$("#mobile-menu").setAttribute("aria-expanded","false")};
 $("#mobile-menu").onclick = () => {if(window.innerWidth>1000){const collapsed=$("#app-shell").classList.toggle("sidebar-collapsed");localStorage.setItem("orbit_sidebar_collapsed",String(collapsed))}else{const open=$(".sidebar").classList.toggle("open");document.body.classList.toggle("mobile-navigation-open",open);$("#mobile-menu").setAttribute("aria-expanded",String(open))}};
@@ -647,7 +715,6 @@ function render() {
   const names = {dashboard:"Overview",projects:"Projects",board:"Task board",gantt:"Gantt chart",report:"Project report",people:"People & teams",profile:"My profile",skills:"Skills",analytics:"Team & member analytics",users:"Users",notifications:"Notifications",chat:"Messages"};
   document.body.classList.toggle("footer-hidden",state.view==="chat");
   $("#page-title").textContent = names[state.view];
-  $("#quick-task").classList.toggle("hidden", state.view !== "board" || !state.project || !canManageProject());
   $("#admin-users-nav").classList.toggle("hidden",!isAdmin());
   $("#admin-skills-nav").classList.toggle("hidden",!isAdmin());
   $("#admin-people-nav").classList.toggle("hidden",!isAdmin());
@@ -962,6 +1029,28 @@ chatView=function(){
 function experienceElapsed(value){if(!value)return "Select your professional start date";const start=new Date(`${value}T00:00:00`),today=new Date();if(start>today)return "Start date cannot be in the future";let years=today.getFullYear()-start.getFullYear(),months=today.getMonth()-start.getMonth(),days=today.getDate()-start.getDate();if(days<0){months--;days+=new Date(today.getFullYear(),today.getMonth(),0).getDate()}if(months<0){years--;months+=12}return `${years} year${years===1?"":"s"}, ${months} month${months===1?"":"s"}, ${days} day${days===1?"":"s"}`}
 function bindProfileView(){
   const form=$("#profile-form");if(!form)return;
+  const summary=$(".profile-summary");
+  if(summary&&!$(".profile-organization",summary)){
+    const organization=document.createElement("div");
+    organization.className="profile-organization";
+    organization.innerHTML=`<small>ORGANIZATION</small><strong>${esc(state.user?.organization_name||"Organization not assigned")}</strong>`;
+    summary.querySelector(".profile-completion")?.before(organization);
+  }
+  if(isAdmin()){
+    const editor=document.createElement("section");
+    editor.className="profile-organization-editor";
+    editor.innerHTML=`<div><small>ORGANIZATION SETTINGS</small><h3>Organization name</h3><p>This name is shown to every Admin and Member in your organization.</p></div><div class="profile-organization-control"><input id="profile-organization-name" maxlength="180" value="${esc(state.user.organization_name||"")}" aria-label="Organization name"><button id="save-organization-name" class="btn" type="button">Save name</button></div><small id="organization-name-error" class="form-error hidden"></small>`;
+    form.prepend(editor);
+    $("#save-organization-name").onclick=async()=>{
+      const input=$("#profile-organization-name"),button=$("#save-organization-name"),error=$("#organization-name-error"),name=input.value.trim().replace(/\s+/g," ");
+      error.classList.add("hidden");
+      if(name.length<2){error.textContent="Organization name must contain at least 2 characters.";error.classList.remove("hidden");input.focus();return}
+      button.disabled=true;button.textContent="Saving…";
+      try{const organization=await api("/auth/organization",{method:"PATCH",body:JSON.stringify({name})});state.user.organization_name=organization.name;syncUserChrome();render();toast("Organization name updated")}
+      catch(err){error.textContent=err.message;error.classList.remove("hidden")}
+      finally{button.disabled=false;button.textContent="Save name"}
+    };
+  }
   $$('[data-profile-project]').forEach(button=>button.onclick=()=>toggleProfileProject(Number(button.dataset.profileProject),button));
   form.noValidate=true;
   const bio=form.elements.bio,bioCount=$("#bio-count");bio.required=false;bio.closest('label').firstChild.textContent='About me (optional)';bio.oninput=()=>bioCount.textContent=bio.value.length;
@@ -1008,6 +1097,10 @@ function analyticsDashboard(tab,members,teams){if(tab==="overview")return analyt
 function exportAnalyticsPdf(){if(!state.analytics){toast("Analytics report is not ready",true);return}const {members,teams}=analyticsData(),pages=[],money=value=>`INR ${Number(value||0).toLocaleString("en-IN")}`,cover=pdfPageHeader("Team & Member Analytics","Complete global dashboard report · all toggle panels",1),hours=members.reduce((sum,item)=>sum+item.planned_hours,0),cost=members.reduce((sum,item)=>sum+item.planned_cost,0);cover.push(pdfRect(32,92,778,72,"#526dff"),pdfLabel("GLOBAL RESOURCE REPORT",48,107,8,"#dfe4ff",true),pdfLabel(`${members.length} people · ${teams.length} teams`,48,127,21,"#ffffff",true),pdfLabel(`Generated ${new Date().toLocaleString()}`,560,129,9,"#ffffff",false,225));[["Admins",members.filter(x=>x.role==="admin").length],["Members",members.filter(x=>x.role==="member").length],["Active accounts",members.filter(x=>x.is_active).length],["Eligible",members.filter(x=>x.completion_percent>=50&&x.team_id&&x.department&&x.designation).length],["Active assignments",members.reduce((s,x)=>s+x.active_tasks,0)],["Overdue exposure",members.filter(x=>x.overdue_tasks).length],["Planned hours",hours],["Resource cost",money(cost)]].forEach(([label,value],index)=>{const x=32+(index%4)*197,y=184+Math.floor(index/4)*67;cover.push(pdfRect(x,y,185,55,"#ffffff","#e4e9f1"),pdfLabel(label,x+10,y+9,7,"#71809c",true,165),pdfLabel(value,x+10,y+27,12,"#17233c",true,165))});cover.push(pdfLabel("Applied filters",32,345,12,"#17233c",true),...pdfWrapped(Object.entries(state.analyticsFilters).filter(([,value])=>value).map(([key,value])=>`${pretty(key)}: ${value}`).join(" · ")||"No filters — complete global dataset",32,368,760,9,"#71809c",false,4,13));pages.push(cover);
   for(let offset=0;offset<Math.max(1,teams.length);offset+=9){const group=teams.slice(offset,offset+9),page=pdfPageHeader("Team Performance",`${teams.length} matching teams · manager, delivery, workload and cost`,pages.length+1),headers=["Team / manager","Members","Active","Done","Overdue","Progress","Hours","Cost"],widths=[245,65,65,65,65,75,75,123];let x=24;headers.forEach((h,i)=>{page.push(pdfRect(x,92,widths[i],27,"#edf0f6","#dfe5ef"),pdfLabel(h,x+5,101,7,"#17233c",true,widths[i]-10));x+=widths[i]});group.forEach((item,row)=>{let cellX=24,y=119+row*48;[`${item.name} · ${item.manager_name||"No manager"}`,item.members,item.active_tasks,item.completed_tasks,item.overdue_tasks,`${item.average_progress}%`,item.planned_hours,money(item.planned_cost)].forEach((value,i)=>{page.push(pdfRect(cellX,y,widths[i],48,row%2?"#f8f9fc":"#ffffff","#e4e9f1"),pdfLabel(value,cellX+5,y+16,7,"#17233c",i===0,widths[i]-10));cellX+=widths[i]})});pages.push(page)}
   for(let offset=0;offset<Math.max(1,members.length);offset+=9){const group=members.slice(offset,offset+9),page=pdfPageHeader("Member Performance",`${members.length} matching people · profile, team, tasks, workload and cost`,pages.length+1),headers=["Member","Role","Team / designation","Profile","Active","Overdue","Hours","Cost","Progress"],widths=[150,50,180,60,55,55,55,100,70];let x=24;headers.forEach((h,i)=>{page.push(pdfRect(x,92,widths[i],27,"#edf0f6","#dfe5ef"),pdfLabel(h,x+4,101,6.5,"#17233c",true,widths[i]-8));x+=widths[i]});group.forEach((item,row)=>{let cellX=24,y=119+row*48;[item.name,pretty(item.role),`${item.team_name||"No team"} · ${item.designation||"No designation"}`,`${item.completion_percent}%`,item.active_tasks,item.overdue_tasks,item.planned_hours,money(item.planned_cost),`${item.average_progress}%`].forEach((value,i)=>{page.push(pdfRect(cellX,y,widths[i],48,row%2?"#f8f9fc":"#ffffff","#e4e9f1"),pdfLabel(value,cellX+4,y+16,6.5,"#17233c",i===0,widths[i]-8));cellX+=widths[i]})});pages.push(page)}
+  const eligible=members.filter(item=>item.completion_percent>=50&&item.team_id&&item.department&&item.designation).length,balanced=members.filter(item=>item.active_tasks>0&&item.planned_hours<=40).length,averageProgress=members.length?Math.round(members.reduce((sum,item)=>sum+item.average_progress,0)/members.length):0;
+  appendPdfGaugeDashboard(pages,"Resource intelligence visual summary","Role mix, assignment readiness, workload balance and delivery progress",[["Administrator mix",members.length?Math.round(members.filter(item=>item.role==="admin").length*100/members.length):0,"#8557d8"],["Assignment readiness",members.length?Math.round(eligible*100/members.length):0,"#23a06b"],["Balanced workload",members.length?Math.round(balanced*100/members.length):0,"#526dff"],["Average progress",averageProgress,"#e59a29"]],teams.map(item=>[item.name,item.planned_cost,"#8557d8"]));
+  appendPdfBarChartPage(pages,"Member workload diagram","Planned hours for every matching person",members.map(item=>[item.name,item.planned_hours]),{valueLabel:value=>`${value} h`,color:"#526dff"});
+  appendPdfBarChartPage(pages,"Team resource-cost diagram","Relative planned personnel cost by team",teams.map(item=>[item.name,item.planned_cost]),{valueLabel:value=>`INR ${Number(value).toLocaleString("en-IN")}`,color:"#8557d8"});
   const analysis=pdfPageHeader("Coverage, Cost & Risk Insights","Skills, department/designation, resource cost and management actions",pages.length+1),skills={},departments={};members.forEach(item=>{item.skills.forEach(skill=>skills[skill]=(skills[skill]||0)+1);const key=`${item.department||"Unassigned"} · ${item.designation||"No designation"}`;departments[key]=(departments[key]||0)+1});analysis.push(pdfLabel("Top skills",32,98,12,"#17233c",true));Object.entries(skills).sort((a,b)=>b[1]-a[1]).slice(0,10).forEach(([name,value],i)=>analysis.push(pdfLabel(`${name}: ${value} people`,42,124+i*17,8,"#526076",i<3,330)));analysis.push(pdfLabel("Department & designation coverage",420,98,12,"#17233c",true));Object.entries(departments).sort((a,b)=>b[1]-a[1]).slice(0,10).forEach(([name,value],i)=>analysis.push(pdfLabel(`${name}: ${value}`,430,124+i*17,8,"#526076",i<3,360)));analysis.push(pdfLabel("Final management insights",32,326,12,"#17233c",true));analyticsInsights(members,teams).forEach((item,i)=>{const y=352+i*34;analysis.push(pdfRect(32,y,778,27,"#ffffff","#e4e9f1"),pdfLabel(`${item.count} · ${item.title}`,43,y+7,8,item.tone==="danger"?"#c83d50":item.tone==="warn"?"#bd7415":"#15956f",true,250),pdfLabel(item.text,300,y+7,8,"#71809c",false,495))});pages.push(analysis);downloadVisualPdf(pages,"team-member-analytics-complete-report");toast("Complete analytics report PDF downloaded")}
 function analyticsSection(title,subtitle,content,id){return `<section id="analytics-${id}" class="analytics-page-section"><div class="analytics-section-heading"><div><span>${esc(title.toUpperCase())}</span><h2>${esc(title)}</h2></div><p>${esc(subtitle)}</p></div>${content}</section>`}
 function analyticsView(){if(!isAdmin())return emptyMini("Admin access required","Only global administrators can access this report.");if(!state.analytics)return `${pageHeading("Team & member analytics","Loading the global resource report…")}${boardWaitAnimation()}`;const {data,members,teams}=analyticsData();return `${pageHeading("Team & member analytics","One complete global workforce, delivery, skills and cost dashboard.",`<div class="board-actions"><button id="analytics-pdf" class="btn primary">Download complete report</button><button id="analytics-refresh" class="btn">Refresh</button></div>`)}${analyticsFiltersHtml(data)}<div id="analytics-dashboard" class="analytics-dashboard analytics-complete-dashboard">${analyticsSection("Executive overview","Headline workforce and delivery indicators.",analyticsOverview(members,teams),"overview")}${analyticsVisualSummary([...members],[...teams])}${analyticsSection("Team performance","Manager, membership, delivery health, workload and cost by team.",analyticsTeams(members,teams),"teams")}${analyticsSection("Member performance","Profile readiness, task delivery, workload and resource cost.",analyticsMembers(members),"members")}${analyticsSection("Workload analysis","Planned hours and active resource demand.",analyticsDashboard("workload",[...members],[...teams]),"workload")}${analyticsSection("Skills coverage","Skill availability across matching Admins and Members.",analyticsDashboard("skills",[...members],[...teams]),"skills")}${analyticsSection("Department & designation","Organisational coverage and professional-role distribution.",analyticsDashboard("departments",[...members],[...teams]),"departments")}${analyticsSection("Cost analysis","Planned personnel cost distributed across global teams.",analyticsDashboard("costs",[...members],[...teams]),"costs")}${analyticsSection("Risks & final insights","Actionable management observations derived from current data.",analyticsDashboard("risks",[...members],[...teams]),"risks")}</div>`}
@@ -1023,6 +1116,9 @@ function exportMemberReportPdf(report){
   [["Projects",summary.projects],["Tasks",summary.tasks],["Completed",summary.completed],["Overdue",summary.overdue],["Average progress",`${summary.average_progress}%`],["Planned hours",summary.planned_hours],["Remaining hours",summary.remaining_hours],["Profile",`${report.member.completion_percent}%`]].forEach(([label,value],index)=>{const x=32+(index%4)*197,y=182+Math.floor(index/4)*62;cover.push(pdfRect(x,y,185,51,"#ffffff","#e4e9f1"),pdfLabel(label,x+10,y+9,7,"#71809c",true,160),pdfLabel(value,x+10,y+27,13,"#17233c",true,160))});
   cover.push(pdfLabel("Workload summary",32,330,12,"#17233c",true),...pdfWrapped(`${pretty(summary.workload)} workload · ${summary.planned_hours} active planned hours against ${report.member.weekly_capacity_hours} weekly capacity. Checklist completion: ${summary.checklist_done}/${summary.checklist_total}.`,32,353,760,9,"#526076",false,5,13));
   pages.push(cover);
+  const checklistPercent=summary.checklist_total?Math.round(summary.checklist_done*100/summary.checklist_total):0,statusRows=["backlog","todo","in_progress","review","testing","done"].map((status,index)=>[pretty(status),report.tasks.filter(task=>task.status===status).length,["#94a3b8","#526dff","#e59a29","#8557d8","#a855f7","#23a06b"][index]]);
+  appendPdfGaugeDashboard(pages,`${report.member.name} — Personal progress diagrams`,"Task progress, checklist completion, profile readiness and workload",[["Average task progress",summary.average_progress,"#23a06b"],["Checklist completion",checklistPercent,"#8557d8"],["Profile completion",report.member.completion_percent,"#526dff"],["Weekly capacity used",report.member.weekly_capacity_hours?Math.round(Math.min(100,summary.planned_hours*100/report.member.weekly_capacity_hours)):0,"#e59a29"]],statusRows);
+  appendPdfBarChartPage(pages,`${report.member.name} — Project contribution diagram`,"Planned personal hours across allocated projects",report.projects.map(project=>[project.name,project.planned_hours]),{valueLabel:value=>`${value} h`,color:"#526dff"});
   report.projects.forEach(project=>{
     const tasks=report.tasks.filter(task=>task.project_id===project.id),chunks=[];
     for(let index=0;index<tasks.length;index+=18)chunks.push(tasks.slice(index,index+18));
@@ -1036,12 +1132,18 @@ function exportMemberReportPdf(report){
       pages.push(page);
     });
   });
-  downloadVisualPdf(pages,`${report.member.name.replace(/[^a-z0-9]+/gi,"-").toLowerCase()}-performance-report.pdf`);
+  downloadVisualPdf(pages,`${report.member.name.replace(/[^a-z0-9]+/gi,"-").toLowerCase()}-performance-report`);
 }
 function bindMemberReport(report,root){const close=()=>root.remove();$("[data-member-report-close]",root).onclick=close;root.onclick=event=>{if(event.target===root)close()};$$('[data-member-report-tab]',root).forEach(button=>button.onclick=()=>{memberReportUi.tab=button.dataset.memberReportTab;if(memberReportUi.tab==="progress")memberReportUi.projectId=null;renderMemberReport(report)});const body=$(".member-report-body",root),project=$("#member-report-project",root);if(project)project.onchange=()=>{memberReportUi.projectId=Number(project.value);renderMemberReport(report)};[["#member-report-search","query"],["#member-report-status","status"],["#member-report-priority","priority"],["#member-report-health","health"]].forEach(([selector,key])=>{const input=$(selector,root);if(input)input.oninput=()=>{memberReportUi[key]=input.value;$(".member-report-dynamic",root).innerHTML=memberReportContent(report);bindMemberReportDynamic(report,root)}});$("[data-member-report-reset]",root).onclick=()=>{memberReportUi.query=memberReportUi.status=memberReportUi.priority=memberReportUi.health="";renderMemberReport(report)};$("[data-member-report-pdf]",root).onclick=()=>exportMemberReportPdf(report);bindMemberReportDynamic(report,root)}
 function bindMemberReportDynamic(report,root){$$('[data-member-task]',root).forEach(button=>button.onclick=()=>{root.remove();taskDetail(Number(button.dataset.memberTask))});const project=$("#member-report-project",root);if(project)project.onchange=()=>{memberReportUi.projectId=Number(project.value);renderMemberReport(report)}}
 function renderMemberReport(report){$("#member-report-panel")?.remove();const root=document.createElement("div");root.id="member-report-panel";root.className="member-report-backdrop";root.innerHTML=`<aside class="member-report-drawer"><header><div><span class="report-eyebrow">MEMBER PERFORMANCE</span><h2>${esc(report.member.name)}</h2><p>${esc(pretty(report.member.role))} · ${esc(report.member.team_name||"No team")} · ${esc(report.member.department||"No department")} · ${esc(report.member.designation||"No designation")}</p></div><div><button class="btn" data-member-report-pdf>Download PDF</button><button class="member-report-close" data-member-report-close aria-label="Close">×</button></div></header><nav class="member-report-tabs"><button class="${memberReportUi.tab==="progress"?"active":""}" data-member-report-tab="progress">My progress</button><button class="${memberReportUi.tab==="projects"?"active":""}" data-member-report-tab="projects">Project performance <span>${report.projects.length}</span></button></nav><section class="member-report-filters"><input id="member-report-search" value="${esc(memberReportUi.query)}" placeholder="Search task, project or responsibility"><select id="member-report-status"><option value="">All statuses</option>${["backlog","todo","in_progress","review","testing","done"].map(value=>`<option value="${value}" ${memberReportUi.status===value?"selected":""}>${pretty(value)}</option>`).join("")}</select><select id="member-report-priority"><option value="">All priorities</option>${["low","medium","high","urgent"].map(value=>`<option value="${value}" ${memberReportUi.priority===value?"selected":""}>${pretty(value)}</option>`).join("")}</select><select id="member-report-health"><option value="">All health</option>${["on_track","due_soon","overdue","completed","unscheduled"].map(value=>`<option value="${value}" ${memberReportUi.health===value?"selected":""}>${pretty(value)}</option>`).join("")}</select><button class="btn" data-member-report-reset>Reset</button></section><main class="member-report-body"><div class="member-report-dynamic">${memberReportContent(report)}</div></main></aside>`;document.body.append(root);bindMemberReport(report,root)}
-async function openMemberReport(memberId=null){try{toast("Preparing performance report…");memberReportUi.tab="progress";memberReportUi.projectId=null;const report=await api(memberId?`/admin/members/${memberId}/report`:"/members/me/report");renderMemberReport(report)}catch(error){toast(error.message||"Unable to load member report",true)}}
+async function openMemberReport(memberId=null){
+  $("#member-report-panel")?.remove();
+  const loading=document.createElement("div");loading.id="member-report-panel";loading.className="member-report-backdrop";
+  loading.innerHTML='<aside class="member-report-drawer member-report-loading"><div class="boot-orbit" role="status" aria-label="Preparing report"><i></i><i></i><i></i></div><strong>Preparing your performance report</strong><span>Loading your permitted projects, tasks and progress…</span></aside>';
+  document.body.append(loading);
+  try{memberReportUi.tab="progress";memberReportUi.projectId=null;const report=await api(memberId?`/admin/members/${memberId}/report`:"/members/me/report");renderMemberReport(report)}catch(error){loading.remove();toast(error.message||"Unable to load member report",true)}
+}
 function openAnalyticsDrawer(type,id){const {data}=analyticsData(),item=(type==="member"?data.members:data.teams).find(entry=>entry.id===id);if(!item)return;const old=$("#analytics-drawer");old?.remove();const members=type==="team"?data.members.filter(member=>item.member_ids.includes(member.id)):[],tasks=type==="member"?item.tasks:members.flatMap(member=>member.tasks);const el=document.createElement("div");el.id="analytics-drawer";el.className="analytics-drawer-backdrop";el.innerHTML=`<aside class="analytics-drawer"><button class="analytics-drawer-close">×</button><span class="report-eyebrow">${type.toUpperCase()} REPORT</span><h2>${esc(item.name)}</h2><p>${type==="member"?`${esc(item.role)} · ${esc(item.department||"No department")} · ${esc(item.designation||"No designation")}`:`${esc(item.manager_name||"No manager")} · ${item.members} members`}</p>${type==="member"?`<button class="btn primary" data-open-member-report="${id}">Open full performance report</button>`:""}<div class="analytics-drawer-kpis">${type==="member"?`${analyticsKpi("Profile",`${item.completion_percent}%`)}${analyticsKpi("Active tasks",item.active_tasks)}${analyticsKpi("Planned hours",item.planned_hours)}${analyticsKpi("Planned cost",`₹${item.planned_cost.toLocaleString("en-IN")}`)}`:`${analyticsKpi("Progress",`${item.average_progress}%`)}${analyticsKpi("Active tasks",item.active_tasks)}${analyticsKpi("Overdue",item.overdue_tasks)}${analyticsKpi("Planned hours",item.planned_hours)}`}</div>${type==="team"?`<h3>Members</h3><div class="drawer-list">${members.map(member=>`<button data-analytics-member="${member.id}"><b>${esc(member.name)}</b><span>${esc(member.designation||"No designation")} · ${member.active_tasks} active tasks</span></button>`).join("")}</div>`:`<h3>Skills</h3><div class="skill-tags">${item.skills.map(skill=>`<span>${esc(skill)}</span>`).join("")||"No skills"}</div>`}<h3>Task assignments</h3><div class="drawer-list">${tasks.map(task=>`<div><b>${esc(task.title)}</b><span>${esc(task.project_name)} · ${pretty(task.status)} · ${task.progress}%${task.responsibility?` · ${esc(task.responsibility)}`:""}</span></div>`).join("")||"No task assignments"}</div></aside>`;document.body.append(el);const close=()=>el.remove();$(".analytics-drawer-close",el).onclick=close;el.onclick=event=>{if(event.target===el)close()};$("[data-open-member-report]",el)?.addEventListener("click",()=>{close();openMemberReport(id)});$$('[data-analytics-member]',el).forEach(button=>button.onclick=()=>{close();openAnalyticsDrawer("member",Number(button.dataset.analyticsMember))});document.addEventListener("keydown",function handler(event){if(event.key==="Escape"){close();document.removeEventListener("keydown",handler)}})}
 function skillsView(){
   if(!isAdmin())return emptyMini("Admin access required","Only global administrators can search skills and assign work.");

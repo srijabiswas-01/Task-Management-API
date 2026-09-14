@@ -35,7 +35,7 @@ PostgreSQL connection string for deployment.
 
 The included responsive frontend provides:
 
-- Registration and login
+- Registration with create-or-join organization selection and login
 - Workspace creation and switching
 - Workspace overview metrics
 - Project and sprint management
@@ -70,19 +70,32 @@ The included responsive frontend provides:
   progress, effort, and checklist completion
 - Admin-only Users, People & Teams, Skills, and Team & Member Analytics pages
 
-After signing in, an Admin can approve accounts, assign Admin or Member access,
-manage global organisation data, and create workspaces/projects. Members can use
+When a new organization is created, its creator becomes that organization's first
+Admin. People joining an existing organization remain pending until one of its
+Admins approves them. After signing in, an Admin can approve only accounts in the
+same organization, assign Admin or Member access, manage organization data, and
+create workspaces/projects. Members can use
 the global communication and profile features even before being assigned to a
 workspace. Workspace-dependent project screens become available through allocation.
 
-## Global access and organisation model
+## Organization tenancy and access model
 
 - The only application access roles are **Admin** and **Member**.
-- Newly registered accounts remain approval-pending until an Admin approves them.
+- Every user, workspace, team, catalog item, holiday, and global chat belongs to
+  exactly one organization.
+- Registration supports creating a uniquely named organization or joining an
+  existing organization from the bounded public picker.
+- Organization names are compared case-insensitively, preventing duplicates that
+  differ only by capitalization or spacing.
+- Newly registered joiners remain approval-pending until an Admin from that same
+  organization approves them.
+- Organization Admins cannot browse, approve, allocate, message, or report on
+  records owned by another organization.
+- Existing pre-tenancy data is preserved by migration into **ABC Organization**.
 - An approved account can sign in before being assigned an application role.
 - Admins have Member capabilities plus global administration permissions.
 - Users, People & Teams, Skills, Messages, Notifications, departments,
-  designations, and teams are global rather than workspace-owned workflows.
+  designations, and teams are organization-wide rather than workspace-owned workflows.
 - Every designation belongs to one department.
 - Every team member, including a team manager, can belong to only one global team.
 - Department and designation are controlled by an Admin.

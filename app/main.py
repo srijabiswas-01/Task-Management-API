@@ -16,8 +16,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.database import Base, SessionLocal, engine
-from app.models import Department, Designation, GlobalDepartment, GlobalDesignation
-from app.routers import admin, ai, auth, boards, chat, notifications, projects, tasks, workspaces
+from app.models import Department, Designation, GlobalDepartment, GlobalDesignation, Organization
+from app.routers import admin, ai, assistant, auth, boards, chat, notifications, projects, tasks, workspaces
 
 logger = logging.getLogger(__name__)
 request_buckets: dict[tuple[str, str], deque[float]] = defaultdict(deque)
@@ -28,6 +28,7 @@ async def notification_cleanup_loop() -> None:
         try:
             with SessionLocal() as db:
                 notifications.cleanup_expired_notifications(db, force=True)
+                assistant.cleanup_expired_conversations(db)
         except Exception:
             logger.exception("Notification retention cleanup failed")
         await asyncio.sleep(3600)
@@ -47,6 +48,36 @@ async def lifespan(_: FastAPI):
         return
     # Alembic is preferred in production. This keeps local setup friction-free.
     Base.metadata.create_all(bind=engine)
+    # Existing local databases predate tenancy. Add nullable columns first,
+    # backfill every legacy row into one safe tenant, then let ORM code proceed.
+    tenant_tables = (
+        "users", "workspaces", "teams", "global_departments",
+        "global_designations", "global_skills", "organization_holidays", "chat_conversations",
+    )
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO organizations (name, slug, is_active, created_at, updated_at) "
+            "SELECT 'ABC Organization', 'abc-organization', "
+            + ("1" if engine.dialect.name == "sqlite" else "TRUE")
+            + ", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP WHERE NOT EXISTS "
+            "(SELECT 1 FROM organizations WHERE slug='abc-organization' "
+            "OR lower(name)=lower('ABC Organization'))"
+        ))
+        legacy_organization_id = connection.execute(text(
+            "SELECT id FROM organizations WHERE slug='abc-organization' "
+            "OR lower(name)=lower('ABC Organization') "
+            "ORDER BY CASE WHEN slug='abc-organization' THEN 0 ELSE 1 END, id LIMIT 1"
+        )).scalar_one()
+        for table_name in tenant_tables:
+            columns = {column["name"] for column in inspect(connection).get_columns(table_name)}
+            if "organization_id" not in columns:
+                connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN organization_id INTEGER"))
+            connection.execute(text(
+                f"UPDATE {table_name} SET organization_id=:organization_id WHERE organization_id IS NULL"
+            ), {"organization_id": legacy_organization_id})
+            connection.execute(text(
+                f"CREATE INDEX IF NOT EXISTS ix_{table_name}_organization_id ON {table_name} (organization_id)"
+            ))
     lifecycle_tables = (
         "notifications", "profile_completion_reminders", "global_profile_reminders",
         "global_announcements", "chat_notifications",
@@ -194,13 +225,28 @@ async def lifespan(_: FastAPI):
                 "ALTER TABLE global_designations ADD COLUMN department_id INTEGER "
                 "REFERENCES global_departments(id) ON DELETE CASCADE"
             ))
+        # Older installations enforced catalog names globally. Tenant catalogs
+        # must permit the same normalized name in different organizations.
+        # Remove pre-tenancy global uniqueness. The same catalogue label must
+        # be valid in two independent organizations.
+        if connection.dialect.name == "postgresql":
+            connection.execute(text("ALTER TABLE global_departments DROP CONSTRAINT IF EXISTS uq_global_department_name"))
+            connection.execute(text("ALTER TABLE global_designations DROP CONSTRAINT IF EXISTS uq_global_designation_name"))
+            connection.execute(text("ALTER TABLE global_skills DROP CONSTRAINT IF EXISTS uq_global_skills_name"))
+        connection.execute(text("DROP INDEX IF EXISTS uq_global_department_name_ci"))
+        connection.execute(text("DROP INDEX IF EXISTS uq_global_designation_name_ci"))
+        connection.execute(text("DROP INDEX IF EXISTS uq_global_skill_name_ci"))
         connection.execute(text(
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_global_department_name_ci "
-            "ON global_departments (lower(name))"
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_org_department_name_ci "
+            "ON global_departments (organization_id, lower(name))"
         ))
         connection.execute(text(
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_global_designation_name_ci "
-            "ON global_designations (lower(name))"
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_org_designation_name_ci "
+            "ON global_designations (organization_id, lower(name))"
+        ))
+        connection.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_org_skill_name_ci "
+            "ON global_skills (organization_id, lower(name))"
         ))
     with Session(engine) as db:
         global_designations = {
@@ -208,14 +254,14 @@ async def lifespan(_: FastAPI):
         }
         for item in db.scalars(select(Designation).order_by(Designation.id)).all():
             if item.name.casefold() not in global_designations:
-                db.add(GlobalDesignation(name=item.name, description=item.description))
+                db.add(GlobalDesignation(organization_id=legacy_organization_id, name=item.name, description=item.description))
                 global_designations.add(item.name.casefold())
         global_departments = {
             item.name.casefold() for item in db.scalars(select(GlobalDepartment)).all()
         }
         for item in db.scalars(select(Department).order_by(Department.id)).all():
             if item.name.casefold() not in global_departments:
-                db.add(GlobalDepartment(name=item.name, description=item.description))
+                db.add(GlobalDepartment(organization_id=legacy_organization_id, name=item.name, description=item.description))
                 global_departments.add(item.name.casefold())
         db.commit()
     cleanup_task = asyncio.create_task(notification_cleanup_loop())
@@ -244,7 +290,7 @@ app.add_middleware(
 @app.middleware("http")
 async def rate_limit_sensitive_routes(request, call_next):
     path = request.url.path
-    category = "auth" if path in {"/auth/login", "/auth/register"} else "ai" if "/ai/" in path else None
+    category = "auth" if path in {"/auth/login", "/auth/register"} else "ai" if "/ai/" in path or path == "/assistant/ask" else None
     if category:
         limit = 120 if category == "auth" else 30
         now = monotonic()
@@ -304,6 +350,7 @@ app.include_router(projects.router)
 app.include_router(tasks.router)
 app.include_router(boards.router)
 app.include_router(ai.router)
+app.include_router(assistant.router)
 app.include_router(notifications.router)
 app.include_router(chat.router)
 app.include_router(chat.global_router)

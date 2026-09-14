@@ -288,7 +288,8 @@ def send_global_profile_completion_reminders(
         raise HTTPException(status_code=403, detail="System administrator access required")
     user_ids = list(dict.fromkeys(payload.user_ids))
     users = list(db.scalars(select(User).options(selectinload(User.profile)).where(
-        User.id.in_(user_ids), User.is_active.is_(True), User.is_member.is_(True)
+        User.id.in_(user_ids), User.organization_id == current_user.organization_id,
+        User.is_active.is_(True), User.is_member.is_(True)
     )).all())
     if len(users) != len(user_ids):
         raise HTTPException(status_code=400, detail="Select active Members or Admins only")
@@ -329,7 +330,8 @@ def send_profile_completion_reminders(
     user_ids = list(dict.fromkeys(payload.user_ids))
     users = list(db.scalars(
         select(User).options(selectinload(User.profile)).where(
-            User.id.in_(user_ids), User.is_active.is_(True)
+            User.id.in_(user_ids), User.organization_id == current_user.organization_id,
+            User.is_active.is_(True)
         )
     ).all())
     if len(users) != len(user_ids):

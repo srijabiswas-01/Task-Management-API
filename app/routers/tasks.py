@@ -24,6 +24,7 @@ from app.models import (
     TeamMember,
     Team,
     User,
+    Workspace,
     WorkspaceMember,
     WorkspaceRole,
 )
@@ -92,14 +93,21 @@ def set_task_assignments(db: DB, task: Task, project: Project, assignments: list
     if len(user_ids) != len(set(user_ids)):
         raise HTTPException(status_code=400, detail="Each member can be assigned only once per task")
     if assignments:
+        organization_id = db.scalar(
+            select(Workspace.organization_id).where(Workspace.id == project.workspace_id)
+        )
         pairs = set(db.execute(select(GlobalTeamMember.user_id, GlobalTeamMember.team_id).where(
-            GlobalTeamMember.user_id.in_(user_ids)
+            GlobalTeamMember.user_id.in_(user_ids),
+            GlobalTeamMember.team_id.in_(
+                select(Team.id).where(Team.organization_id == organization_id)
+            ),
         )).all())
         requested = {(item["user_id"], item["team_id"]) for item in assignments}
         if not requested.issubset(pairs):
             raise HTTPException(status_code=400, detail="Every assignee must belong to the selected team")
         users = list(db.scalars(select(User).options(selectinload(User.profile)).where(
-            User.id.in_(user_ids), User.is_active.is_(True), User.is_member.is_(True)
+            User.id.in_(user_ids), User.organization_id == organization_id,
+            User.is_active.is_(True), User.is_member.is_(True)
         )).all())
         if len(users) != len(user_ids):
             raise HTTPException(status_code=400, detail="Every assignee must be an active Member or Admin")
@@ -122,10 +130,13 @@ def set_task_assignments(db: DB, task: Task, project: Project, assignments: list
     task.assignee_id = user_ids[0] if user_ids else None
 
 
-def working_days(db: DB, start: date | None, end: date | None) -> int | None:
+def working_days(
+    db: DB, start: date | None, end: date | None, organization_id: int
+) -> int | None:
     if not start or not end:
         return None
     holidays = set(db.scalars(select(OrganizationHoliday.holiday_date).where(
+        OrganizationHoliday.organization_id == organization_id,
         OrganizationHoliday.is_active.is_(True),
         OrganizationHoliday.holiday_date >= start,
         OrganizationHoliday.holiday_date <= end,
@@ -139,13 +150,18 @@ def working_days(db: DB, start: date | None, end: date | None) -> int | None:
     return days
 
 
-def estimated_assignment_budget(db: DB, assignments: list[dict], total_hours: int | None) -> int | None:
+def estimated_assignment_budget(
+    db: DB, assignments: list[dict], total_hours: int | None, organization_id: int
+) -> int | None:
     if not assignments or total_hours is None:
         return None
     users = {user.id: user for user in db.scalars(select(User).options(selectinload(User.profile)).where(
-        User.id.in_([item["user_id"] for item in assignments])
+        User.id.in_([item["user_id"] for item in assignments]),
+        User.organization_id == organization_id,
     )).all()}
-    designations = {item.name: item.hourly_rate for item in db.scalars(select(GlobalDesignation)).all()}
+    designations = {item.name: item.hourly_rate for item in db.scalars(select(GlobalDesignation).where(
+        GlobalDesignation.organization_id == organization_id
+    )).all()}
     default_hours = total_hours // len(assignments) if assignments else 0
     return sum((item.get("planned_hours") if item.get("planned_hours") is not None else default_hours) *
                designations.get(users[item["user_id"]].profile.professional_title, 0)
@@ -157,6 +173,7 @@ def task_planning_options(project_id: int, db: DB, current_user: CurrentUser) ->
     require_project_admin(db, project_id, current_user.id)
     project = accessible_project(db, project_id, current_user.id)
     teams = list(db.scalars(select(Team).where(
+        Team.organization_id == current_user.organization_id,
         (Team.workspace_id.is_(None)) | (Team.workspace_id == project.workspace_id)
     ).order_by(Team.name)).all())
     global_memberships = list(db.scalars(select(GlobalTeamMember).options(
@@ -166,7 +183,9 @@ def task_planning_options(project_id: int, db: DB, current_user: CurrentUser) ->
         selectinload(TeamMember.user).selectinload(User.profile)
     ).where(TeamMember.team_id.in_([team.id for team in teams])).order_by(TeamMember.team_id, TeamMember.user_id)).all())
     active_statuses = [status for status in TaskStatus if status != TaskStatus.done]
-    hourly_rates = {item.name: item.hourly_rate for item in db.scalars(select(GlobalDesignation)).all()}
+    hourly_rates = {item.name: item.hourly_rate for item in db.scalars(select(GlobalDesignation).where(
+        GlobalDesignation.organization_id == current_user.organization_id
+    )).all()}
     task_counts = {
         (user_id, task_project_id): count
         for user_id, task_project_id, count in db.execute(
@@ -198,7 +217,10 @@ def task_planning_options(project_id: int, db: DB, current_user: CurrentUser) ->
             "hourly_rate": hourly_rates.get(user.profile.professional_title, 0),
             "completion_percent": completion, "current_project_tasks": current_count,
             "other_project_tasks": other_count, "total_active_tasks": current_count + other_count})
-    holidays = list(db.scalars(select(OrganizationHoliday).where(OrganizationHoliday.is_active.is_(True)).order_by(OrganizationHoliday.holiday_date)).all())
+    holidays = list(db.scalars(select(OrganizationHoliday).where(
+        OrganizationHoliday.organization_id == current_user.organization_id,
+        OrganizationHoliday.is_active.is_(True),
+    ).order_by(OrganizationHoliday.holiday_date)).all())
     return {"working_hours_per_day": 8, "teams": [{"id": team.id, "name": team.name} for team in teams],
         "members": members, "holidays": [{"date": str(item.holiday_date), "name": item.name} for item in holidays]}
 
@@ -321,13 +343,13 @@ def create_task(
     start_at = values.pop("start_at")
     end_at = values.pop("end_at")
     validate_task_project_dates(project, values.get("start_date"), values.get("due_date"), start_at, end_at)
-    calculated_days = working_days(db, values.get("start_date"), values.get("due_date"))
+    calculated_days = working_days(db, values.get("start_date"), values.get("due_date"), current_user.organization_id)
     if calculated_days is not None:
         values["estimated_days"] = calculated_days
         if values.get("estimated_hours") is None:
             values["estimated_hours"] = calculated_days * 8
     if values.get("planned_budget") is None and assignments:
-        values["planned_budget"] = estimated_assignment_budget(db, assignments, values.get("estimated_hours"))
+        values["planned_budget"] = estimated_assignment_budget(db, assignments, values.get("estimated_hours"), current_user.organization_id)
     if not assignee_ids and legacy_assignee is not None:
         assignee_ids = [legacy_assignee]
     task = Task(
@@ -406,7 +428,7 @@ def update_task(
         start_at,
         end_at,
     )
-    calculated_days = working_days(db, values.get("start_date", task.start_date), values.get("due_date", task.due_date))
+    calculated_days = working_days(db, values.get("start_date", task.start_date), values.get("due_date", task.due_date), current_user.organization_id)
     if calculated_days is not None:
         values["estimated_days"] = calculated_days
         if "estimated_hours" not in values:
@@ -414,7 +436,7 @@ def update_task(
     if assignments is not None:
         set_task_assignments(db, task, project, assignments)
         if "planned_budget" not in values:
-            values["planned_budget"] = estimated_assignment_budget(db, assignments, values.get("estimated_hours", task.estimated_hours))
+            values["planned_budget"] = estimated_assignment_budget(db, assignments, values.get("estimated_hours", task.estimated_hours), current_user.organization_id)
     elif assignee_ids is not None:
         set_task_assignees(db, task, project, assignee_ids)
     elif legacy_assignee is not None:
