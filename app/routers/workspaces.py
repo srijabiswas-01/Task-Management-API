@@ -162,7 +162,10 @@ def update_department(
     for field, value in values.items(): setattr(department, field, value)
     new_name = values.get("name", old_name)
     if new_name != old_name:
-        for profile in db.scalars(select(UserProfile).where(UserProfile.department == old_name)).all():
+        for profile in db.scalars(select(UserProfile).join(User).where(
+            User.organization_id == current_user.organization_id,
+            UserProfile.department == old_name,
+        )).all():
             profile.department = new_name
     commit_catalog_change(db, "Department already exists");db.refresh(department)
     return department
@@ -179,21 +182,24 @@ def delete_department(
     designation_names = list(db.scalars(select(GlobalDesignation.name).where(
         GlobalDesignation.department_id == department.id
     )).all())
-    for profile in db.scalars(select(UserProfile).where(
+    for profile in db.scalars(select(UserProfile).join(User).where(
+        User.organization_id == current_user.organization_id,
         (UserProfile.department == department.name) |
-        (UserProfile.professional_title.in_(designation_names) if designation_names else False)
+        (UserProfile.professional_title.in_(designation_names) if designation_names else False),
     )).all():
         if profile.department == department.name:
             profile.department = None
         if profile.professional_title in designation_names:
             profile.professional_title = None
     if designation_names:
-        for allocation in db.scalars(select(TeamMember).where(
-            TeamMember.designation.in_(designation_names)
+        for allocation in db.scalars(select(TeamMember).join(Team).where(
+            Team.organization_id == current_user.organization_id,
+            TeamMember.designation.in_(designation_names),
         )).all():
             allocation.designation = ""
-        for manager in db.scalars(select(TeamManager).where(
-            TeamManager.designation.in_(designation_names)
+        for manager in db.scalars(select(TeamManager).join(Team).where(
+            Team.organization_id == current_user.organization_id,
+            TeamManager.designation.in_(designation_names),
         )).all():
             manager.designation = ""
     db.delete(department)
@@ -237,33 +243,43 @@ def update_designation(
     db: DB, current_user: CurrentUser
 ) -> GlobalDesignation:
     require_workspace_admin(db, workspace_id, current_user.id)
-    designation = db.get(GlobalDesignation, designation_id)
+    designation = db.scalar(select(GlobalDesignation).where(
+        GlobalDesignation.id == designation_id,
+        GlobalDesignation.organization_id == current_user.organization_id,
+    ))
     if designation is None:
         raise HTTPException(status_code=404, detail="Designation not found")
     values = payload.model_dump(exclude_unset=True)
     old_name = designation.name
     if "department_id" in values:
-        if values["department_id"] is None or db.get(GlobalDepartment, values["department_id"]) is None:
+        if values["department_id"] is None or db.scalar(select(GlobalDepartment.id).where(
+            GlobalDepartment.id == values["department_id"],
+            GlobalDepartment.organization_id == current_user.organization_id,
+        )) is None:
             raise HTTPException(status_code=400, detail="Select a valid department")
     if values.get("name") is not None:
         values["name"] = values["name"].strip()
         duplicate = db.scalar(select(GlobalDesignation.id).where(
-            func.lower(GlobalDesignation.name) == values["name"].casefold(), GlobalDesignation.id != designation_id
+            GlobalDesignation.organization_id == current_user.organization_id,
+            func.lower(GlobalDesignation.name) == values["name"].casefold(), GlobalDesignation.id != designation_id,
         ))
         if duplicate:
             raise HTTPException(status_code=409, detail="Designation already exists")
     for field, value in values.items(): setattr(designation, field, value)
     new_name = values.get("name", old_name)
     if new_name != old_name:
-        allocations = db.scalars(select(TeamMember).where(
-            TeamMember.designation == old_name
+        allocations = db.scalars(select(TeamMember).join(Team).where(
+            Team.organization_id == current_user.organization_id,
+            TeamMember.designation == old_name,
         )).all()
         for allocation in allocations: allocation.designation = designation.name
-        managers = db.scalars(select(TeamManager).where(
-            TeamManager.designation == old_name
+        managers = db.scalars(select(TeamManager).join(Team).where(
+            Team.organization_id == current_user.organization_id,
+            TeamManager.designation == old_name,
         )).all()
         for manager in managers: manager.designation = designation.name
-        profiles = db.scalars(select(UserProfile).where(
+        profiles = db.scalars(select(UserProfile).join(User).where(
+            User.organization_id == current_user.organization_id,
             UserProfile.professional_title == old_name,
         )).all()
         for profile in profiles: profile.professional_title = designation.name
@@ -276,19 +292,25 @@ def delete_designation(
     workspace_id: int, designation_id: int, db: DB, current_user: CurrentUser
 ) -> None:
     require_workspace_admin(db, workspace_id, current_user.id)
-    designation = db.get(GlobalDesignation, designation_id)
+    designation = db.scalar(select(GlobalDesignation).where(
+        GlobalDesignation.id == designation_id,
+        GlobalDesignation.organization_id == current_user.organization_id,
+    ))
     if designation is None:
         raise HTTPException(status_code=404, detail="Designation not found")
-    for allocation in db.scalars(select(TeamMember).where(
-        TeamMember.designation == designation.name
+    for allocation in db.scalars(select(TeamMember).join(Team).where(
+        Team.organization_id == current_user.organization_id,
+        TeamMember.designation == designation.name,
     )).all():
         allocation.designation = ""
-    for manager in db.scalars(select(TeamManager).where(
-        TeamManager.designation == designation.name
+    for manager in db.scalars(select(TeamManager).join(Team).where(
+        Team.organization_id == current_user.organization_id,
+        TeamManager.designation == designation.name,
     )).all():
         manager.designation = ""
-    for profile in db.scalars(select(UserProfile).where(
-        UserProfile.professional_title == designation.name
+    for profile in db.scalars(select(UserProfile).join(User).where(
+        User.organization_id == current_user.organization_id,
+        UserProfile.professional_title == designation.name,
     )).all():
         profile.professional_title = None
     db.delete(designation)
@@ -573,7 +595,10 @@ def skill_catalog(
 ) -> list[str]:
     require_workspace_member(db, workspace_id, current_user.id)
     values = db.scalars(
-        select(UserProfile.skills).join(User).where(User.is_active.is_(True))
+        select(UserProfile.skills).join(User).where(
+            User.organization_id == current_user.organization_id,
+            User.is_active.is_(True),
+        )
     ).all()
     catalog: dict[str, str] = {}
     for value in values:
@@ -589,7 +614,10 @@ def skill_members(
     require_workspace_admin(db, workspace_id, current_user.id)
     users = db.scalars(
         select(User).options(selectinload(User.profile))
-        .where(User.is_active.is_(True)).order_by(User.name, User.email)
+        .where(
+            User.organization_id == current_user.organization_id,
+            User.is_active.is_(True),
+        ).order_by(User.name, User.email)
     ).all()
     allocations = db.execute(
         select(TeamMember.user_id, TeamMember.project_id)

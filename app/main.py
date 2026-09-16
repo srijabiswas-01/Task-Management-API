@@ -236,6 +236,7 @@ async def lifespan(_: FastAPI):
         connection.execute(text("DROP INDEX IF EXISTS uq_global_department_name_ci"))
         connection.execute(text("DROP INDEX IF EXISTS uq_global_designation_name_ci"))
         connection.execute(text("DROP INDEX IF EXISTS uq_global_skill_name_ci"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_global_skills_name"))
         connection.execute(text(
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_org_department_name_ci "
             "ON global_departments (organization_id, lower(name))"

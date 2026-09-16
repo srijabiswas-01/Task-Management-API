@@ -550,7 +550,7 @@ def update_global_department(department_id: int, payload: DepartmentUpdate, db: 
     old_name = item.name
     for field, value in payload.model_dump(exclude_unset=True).items(): setattr(item, field, value.strip() if isinstance(value, str) else value)
     if item.name != old_name:
-        for profile in db.scalars(select(UserProfile).where(UserProfile.department == old_name)).all(): profile.department = item.name
+        for profile in db.scalars(select(UserProfile).join(User).where(User.organization_id == current_user.organization_id, UserProfile.department == old_name)).all(): profile.department = item.name
     db.commit(); db.refresh(item)
     return item
 
@@ -560,7 +560,7 @@ def delete_global_department(department_id: int, db: DB, current_user: CurrentUs
     require_system_admin(current_user)
     item = db.scalar(select(GlobalDepartment).where(GlobalDepartment.id == department_id, GlobalDepartment.organization_id == current_user.organization_id))
     if item is None: raise HTTPException(status_code=404, detail="Department not found")
-    for profile in db.scalars(select(UserProfile).where(UserProfile.department == item.name)).all(): profile.department = None
+    for profile in db.scalars(select(UserProfile).join(User).where(User.organization_id == current_user.organization_id, UserProfile.department == item.name)).all(): profile.department = None
     db.delete(item); db.commit()
 
 
@@ -592,14 +592,14 @@ def update_global_designation(designation_id: int, payload: DesignationUpdate, d
     item = db.scalar(select(GlobalDesignation).where(GlobalDesignation.id == designation_id, GlobalDesignation.organization_id == current_user.organization_id))
     if item is None: raise HTTPException(status_code=404, detail="Designation not found")
     values = payload.model_dump(exclude_unset=True)
-    if values.get("department_id") is not None and db.get(GlobalDepartment, values["department_id"]) is None: raise HTTPException(status_code=400, detail="Select a valid department")
+    if values.get("department_id") is not None and db.scalar(select(GlobalDepartment.id).where(GlobalDepartment.id == values["department_id"], GlobalDepartment.organization_id == current_user.organization_id)) is None: raise HTTPException(status_code=400, detail="Select a valid department")
     old_name = item.name
     for field, value in values.items(): setattr(item, field, value.strip() if isinstance(value, str) else value)
     if item.name != old_name:
-        for profile in db.scalars(select(UserProfile).where(UserProfile.professional_title == old_name)).all(): profile.professional_title = item.name
-        for allocation in db.scalars(select(TeamMember).where(TeamMember.designation == old_name)).all(): allocation.designation = item.name
-        for membership in db.scalars(select(GlobalTeamMember).where(GlobalTeamMember.designation == old_name)).all(): membership.designation = item.name
-        for manager in db.scalars(select(TeamManager).where(TeamManager.designation == old_name)).all(): manager.designation = item.name
+        for profile in db.scalars(select(UserProfile).join(User).where(User.organization_id == current_user.organization_id, UserProfile.professional_title == old_name)).all(): profile.professional_title = item.name
+        for allocation in db.scalars(select(TeamMember).join(Team).where(Team.organization_id == current_user.organization_id, TeamMember.designation == old_name)).all(): allocation.designation = item.name
+        for membership in db.scalars(select(GlobalTeamMember).join(Team).where(Team.organization_id == current_user.organization_id, GlobalTeamMember.designation == old_name)).all(): membership.designation = item.name
+        for manager in db.scalars(select(TeamManager).join(Team).where(Team.organization_id == current_user.organization_id, TeamManager.designation == old_name)).all(): manager.designation = item.name
     db.commit(); db.refresh(item)
     return designation_response(item)
 
@@ -609,9 +609,9 @@ def delete_global_designation(designation_id: int, db: DB, current_user: Current
     require_system_admin(current_user)
     item = db.scalar(select(GlobalDesignation).where(GlobalDesignation.id == designation_id, GlobalDesignation.organization_id == current_user.organization_id))
     if item is None: raise HTTPException(status_code=404, detail="Designation not found")
-    for profile in db.scalars(select(UserProfile).where(UserProfile.professional_title == item.name)).all(): profile.professional_title = None
-    for allocation in db.scalars(select(TeamMember).where(TeamMember.designation == item.name)).all(): allocation.designation = ""
-    for manager in db.scalars(select(TeamManager).where(TeamManager.designation == item.name)).all(): manager.designation = ""
+    for profile in db.scalars(select(UserProfile).join(User).where(User.organization_id == current_user.organization_id, UserProfile.professional_title == item.name)).all(): profile.professional_title = None
+    for allocation in db.scalars(select(TeamMember).join(Team).where(Team.organization_id == current_user.organization_id, TeamMember.designation == item.name)).all(): allocation.designation = ""
+    for manager in db.scalars(select(TeamManager).join(Team).where(Team.organization_id == current_user.organization_id, TeamManager.designation == item.name)).all(): manager.designation = ""
     db.delete(item); db.commit()
 
 
